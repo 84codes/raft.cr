@@ -206,10 +206,18 @@ spec/
 
 ## Future Optimizations
 
-- **Typed message structs** — split `Message` into typed structs with inheritance for smaller wire size
-- **CRC32 checksums** on log entries for corruption detection
+### Performance
+- **MFile (mmap) backend** — swap File IO in Segment for LavinMQ's MFile for zero-copy reads via page cache
 - **`socket.sendfile`** — zero-copy replication and snapshot transfer when Crystal adds support
-- **Pre-vote protocol** — prevents disruptive elections from partitioned nodes
-- **Pipeline replication** — send multiple AppendEntries without waiting for responses
+- **Pipeline replication** — send multiple AppendEntries without waiting for responses, optimistically advance `next_index`
 - **Batched writes** — coalesce multiple entries into a single `msync` call
 - **Read-only queries** — serve reads from followers with read index protocol
+
+### Reliability
+- **Snapshot transfer** — implement InstallSnapshot RPC for chunked streaming of snapshots to slow/new followers
+- **CRC32 checksums** on log entries for corruption detection
+- **Pre-vote protocol** — prevents disruptive elections from partitioned nodes rejoining the cluster
+
+### Protocol
+- **Typed message structs** — split `Message` into typed structs with inheritance for smaller wire size
+- **Membership changes** — single-server configuration changes (add/remove one node at a time via `EntryType::Configuration` log entries) for dynamic cluster resizing without downtime
