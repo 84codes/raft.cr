@@ -267,4 +267,42 @@ describe Raft::Node do
       FileUtils.rm_rf(dir2)
     end
   end
+
+  describe "persistence" do
+    it "persists and recovers term and voted_for" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+
+      dir = File.tempname("raft_persist")
+      Dir.mkdir_p(dir)
+
+      c1 = Raft::Config.new
+      c1.data_dir = dir
+      c1.election_timeout_min_ticks = 5_u32
+      c1.election_timeout_max_ticks = 5_u32
+
+      sm = TestStateMachine.new
+      node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1, state_machine: sm)
+
+      5.times { node.tick }
+      node.current_term.should eq 1_u64
+      node.voted_for.should eq 1_u64
+      node.close
+
+      c2 = Raft::Config.new
+      c2.data_dir = dir
+      c2.election_timeout_min_ticks = 5_u32
+      c2.election_timeout_max_ticks = 5_u32
+
+      sm2 = TestStateMachine.new
+      node2 = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c2, state_machine: sm2)
+      node2.current_term.should eq 1_u64
+      node2.voted_for.should eq 1_u64
+      node2.role.should eq Raft::Role::Follower
+
+      node2.close
+      FileUtils.rm_rf(dir)
+    end
+  end
 end

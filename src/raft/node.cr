@@ -23,6 +23,7 @@ module Raft
     def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T))
       @log = Log(T).new(@config)
       @election_timeout = random_election_timeout
+      recover_state
     end
 
     def tick
@@ -47,6 +48,7 @@ module Raft
       if message.term > @current_term
         @current_term = message.term
         become_follower(message.from)
+        persist_state
       end
 
       case message.type
@@ -86,6 +88,7 @@ module Raft
       @election_timeout = random_election_timeout
       @votes_received = Set(NodeID).new
       @votes_received.add(@id)
+      persist_state
 
       @peers.each do |peer|
         @outbox << Message.new(
@@ -104,6 +107,7 @@ module Raft
       @voted_for = nil
       @election_tick = 0_u32
       @election_timeout = random_election_timeout
+      persist_state
     end
 
     private def become_leader
@@ -237,6 +241,7 @@ module Raft
             @voted_for = msg.from
             vote_granted = true
             @election_tick = 0_u32
+            persist_state
           end
         end
       end
@@ -288,6 +293,29 @@ module Raft
 
     private def random_election_timeout : UInt32
       @random.rand(@config.election_timeout_min_ticks..@config.election_timeout_max_ticks)
+    end
+
+    private def persist_state
+      path = File.join(@config.data_dir, "raft_meta")
+      File.open(path, "wb") do |f|
+        f.write_bytes(@current_term, IO::ByteFormat::LittleEndian)
+        if vf = @voted_for
+          f.write_bytes(1_u8, IO::ByteFormat::LittleEndian)
+          f.write_bytes(vf, IO::ByteFormat::LittleEndian)
+        else
+          f.write_bytes(0_u8, IO::ByteFormat::LittleEndian)
+        end
+      end
+    end
+
+    private def recover_state
+      path = File.join(@config.data_dir, "raft_meta")
+      return unless File.exists?(path)
+      File.open(path, "rb") do |f|
+        @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
+        @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
+      end
     end
   end
 end
