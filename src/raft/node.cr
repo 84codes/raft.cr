@@ -215,7 +215,7 @@ module Raft
         @peers.each do |peer|
           replication_count += 1 if @match_index.fetch(peer, 0_u64) >= n
         end
-        quorum = (@peers.size + 1) / 2 + 1
+        quorum = (@peers.size + 1) // 2 + 1
         if replication_count >= quorum
           apply_entries(@commit_index + 1, n)
           @commit_index = n
@@ -260,7 +260,7 @@ module Raft
 
       if msg.success
         @votes_received.add(msg.from)
-        quorum = (@peers.size + 1) / 2 + 1
+        quorum = (@peers.size + 1) // 2 + 1
         become_leader if @votes_received.size >= quorum
       end
     end
