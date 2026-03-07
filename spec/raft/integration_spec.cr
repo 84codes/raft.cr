@@ -1,6 +1,4 @@
 require "../spec_helper"
-require "file_utils"
-require "./helpers/test_state_machine"
 
 # Helper: deliver all pending messages between nodes until no more to deliver
 def deliver_all(nodes : Hash(Raft::NodeID, Raft::Node(TestData)))

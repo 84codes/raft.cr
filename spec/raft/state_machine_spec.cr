@@ -1,5 +1,4 @@
 require "../spec_helper"
-require "./helpers/test_state_machine"
 
 describe Raft::StateMachine do
   it "applies entries and round-trips via snapshot" do

@@ -1,6 +1,4 @@
 require "../spec_helper"
-require "file_utils"
-require "./helpers/test_state_machine"
 
 def create_test_node(id : Raft::NodeID, peers : Array(Raft::NodeID), config : Raft::Config? = nil) : Raft::Node(TestData)
   cfg = Raft::Config.new

@@ -1,6 +1,4 @@
 require "../spec_helper"
-require "file_utils"
-require "./helpers/test_state_machine"
 
 describe Raft::Server do
   it "ticks all registered nodes" do

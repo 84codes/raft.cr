@@ -1,25 +1,5 @@
 require "../spec_helper"
 
-# A simple test type that implements to_io/from_io
-struct TestData
-  getter value : String
-
-  def initialize(@value : String)
-  end
-
-  def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
-    io.write_bytes(@value.bytesize.to_u32, format)
-    io.write(@value.to_slice)
-  end
-
-  def self.from_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian) : self
-    size = io.read_bytes(UInt32, format)
-    slice = Bytes.new(size)
-    io.read_fully(slice)
-    new(String.new(slice))
-  end
-end
-
 describe Raft::LogEntry do
   it "round-trips through IO" do
     entry = Raft::LogEntry(TestData).new(

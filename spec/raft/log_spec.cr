@@ -1,6 +1,4 @@
 require "../spec_helper"
-require "file_utils"
-require "./helpers/test_state_machine"
 
 describe Raft::Log do
   it "appends entries and reads them back" do

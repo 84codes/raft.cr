@@ -1,0 +1,9 @@
+name: raft
+version: 0.1.0
+
+authors:
+  - Anton Dalgren <anton@84codes.com>
+
+crystal: '>= 1.19.1'
+
+license: MIT
