@@ -1,0 +1,55 @@
+require "../spec_helper"
+
+# A simple test type that implements to_io/from_io
+struct TestData
+  getter value : String
+
+  def initialize(@value : String)
+  end
+
+  def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
+    io.write_bytes(@value.bytesize.to_u32, format)
+    io.write(@value.to_slice)
+  end
+
+  def self.from_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian) : self
+    size = io.read_bytes(UInt32, format)
+    slice = Bytes.new(size)
+    io.read_fully(slice)
+    new(String.new(slice))
+  end
+end
+
+describe Raft::LogEntry do
+  it "round-trips through IO" do
+    entry = Raft::LogEntry(TestData).new(
+      term: 1_u64,
+      index: 1_u64,
+      entry_type: Raft::EntryType::Normal,
+      data: TestData.new("hello")
+    )
+
+    io = IO::Memory.new
+    entry.to_io(io)
+    io.rewind
+    restored = Raft::LogEntry(TestData).from_io(io)
+
+    restored.term.should eq 1_u64
+    restored.index.should eq 1_u64
+    restored.entry_type.should eq Raft::EntryType::Normal
+    restored.data.value.should eq "hello"
+  end
+
+  it "reports correct byte size" do
+    entry = Raft::LogEntry(TestData).new(
+      term: 1_u64,
+      index: 1_u64,
+      entry_type: Raft::EntryType::Normal,
+      data: TestData.new("hello")
+    )
+
+    io = IO::Memory.new
+    entry.to_io(io)
+    io.pos.should eq(8 + 8 + 1 + 4 + 4 + 5) # term + index + type + data_size + string_size + "hello"
+  end
+end
