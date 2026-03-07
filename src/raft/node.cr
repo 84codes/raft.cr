@@ -133,7 +133,53 @@ module Raft
 
       @leader_id = msg.from
 
-      # For now, just respond success (replication logic in Task 10)
+      # Check prev_log consistency
+      if msg.prev_log_index > 0
+        if msg.prev_log_index > @log.last_index
+          @outbox << Message.new(
+            type: MessageType::AppendEntriesResponse,
+            from: @id,
+            term: @current_term,
+            success: false,
+            reject_hint: @log.last_index,
+          )
+          return
+        end
+        if @log.term_at(msg.prev_log_index) != msg.prev_log_term
+          @outbox << Message.new(
+            type: MessageType::AppendEntriesResponse,
+            from: @id,
+            term: @current_term,
+            success: false,
+            reject_hint: msg.prev_log_index - 1,
+          )
+          return
+        end
+      end
+
+      # Append new entries
+      if msg.entries_count > 0 && msg.entries_data.size > 0
+        io = IO::Memory.new(msg.entries_data)
+        msg.entries_count.times do
+          entry = LogEntry(T).from_io(io)
+          if entry.index <= @log.last_index
+            if @log.term_at(entry.index) != entry.term
+              @log.truncate_after(entry.index - 1)
+              @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
+            end
+          else
+            @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
+          end
+        end
+      end
+
+      # Update commit index and apply
+      if msg.commit_index > @commit_index
+        new_commit = Math.min(msg.commit_index, @log.last_index)
+        apply_entries(@commit_index + 1, new_commit)
+        @commit_index = new_commit
+      end
+
       @outbox << Message.new(
         type: MessageType::AppendEntriesResponse,
         from: @id,
@@ -144,7 +190,41 @@ module Raft
     end
 
     private def handle_append_entries_response(msg : Message)
-      # Placeholder for Task 10
+      return unless @role == Role::Leader
+
+      if msg.success
+        if msg.last_log_index > @match_index.fetch(msg.from, 0_u64)
+          @match_index[msg.from] = msg.last_log_index
+          @next_index[msg.from] = msg.last_log_index + 1
+        end
+        advance_commit_index
+      else
+        hint = msg.reject_hint
+        @next_index[msg.from] = Math.max(hint + 1, 1_u64)
+      end
+    end
+
+    private def advance_commit_index
+      (@commit_index + 1..@log.last_index).reverse_each do |n|
+        next unless @log.term_at(n) == @current_term
+        replication_count = 1 # count self
+        @peers.each do |peer|
+          replication_count += 1 if @match_index.fetch(peer, 0_u64) >= n
+        end
+        quorum = (@peers.size + 1) / 2 + 1
+        if replication_count >= quorum
+          apply_entries(@commit_index + 1, n)
+          @commit_index = n
+          break
+        end
+      end
+    end
+
+    private def apply_entries(from : UInt64, to : UInt64)
+      (from..to).each do |i|
+        entry = @log.get(i)
+        @state_machine.apply(entry.data)
+      end
     end
 
     private def handle_request_vote(msg : Message)
