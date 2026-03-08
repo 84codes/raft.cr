@@ -8,7 +8,9 @@ module Raft
     getter commit_index : UInt64 = 0_u64
     getter log : Log(T)
 
-    @peers : Array(NodeID)
+    getter peers : Array(NodeID)
+    getter paused : Bool = false
+    property metrics : Metrics? = nil
     @config : Config
     @state_machine : StateMachine(T)
     @outbox : Array(Message) = [] of Message
@@ -26,7 +28,16 @@ module Raft
       recover_state
     end
 
+    def pause
+      @paused = true
+    end
+
+    def resume
+      @paused = false
+    end
+
     def tick
+      return if @paused
       case @role
       when Role::Follower
         @election_tick += 1
@@ -44,6 +55,7 @@ module Raft
     end
 
     def step(message : Message)
+      return if @paused
       # If message has a higher term, step down
       if message.term > @current_term
         @current_term = message.term
@@ -89,6 +101,7 @@ module Raft
       @votes_received = Set(NodeID).new
       @votes_received.add(@id)
       persist_state
+      @metrics.try(&.increment("raft_elections_total"))
 
       @peers.each do |peer|
         @outbox << Message.new(
@@ -122,6 +135,8 @@ module Raft
     end
 
     private def handle_append_entries(msg : Message)
+      @metrics.try(&.increment("raft_messages_received_total"))
+      @metrics.try(&.increment("raft_heartbeats_received_total")) if msg.entries_count == 0
       @election_tick = 0_u32
 
       if msg.term < @current_term
@@ -228,6 +243,7 @@ module Raft
       (from..to).each do |i|
         entry = @log.get(i)
         @state_machine.apply(entry.data)
+        @metrics.try(&.increment("raft_entries_applied_total"))
       end
     end
 
@@ -288,6 +304,8 @@ module Raft
           entries_data: entries_io.to_slice.dup,
           entries_count: entries_count,
         )
+        @metrics.try(&.increment("raft_messages_sent_total"))
+        @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
       end
     end
 

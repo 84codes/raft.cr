@@ -266,6 +266,33 @@ describe Raft::Node do
     end
   end
 
+  describe "pause and resume" do
+    it "does not tick when paused" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 3_u32
+      config.election_timeout_max_ticks = 3_u32
+
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
+      node.pause
+      10.times { node.tick }
+      node.role.should eq Raft::Role::Follower # should not have become candidate
+
+      node.resume
+      3.times { node.tick }
+      node.role.should eq Raft::Role::Candidate
+
+      node.close
+    end
+  end
+
+  describe "peers" do
+    it "exposes peer list" do
+      node = create_test_node(1_u64, [2_u64, 3_u64])
+      node.peers.should eq [2_u64, 3_u64]
+      node.close
+    end
+  end
+
   describe "persistence" do
     it "persists and recovers term and voted_for" do
       config = Raft::Config.new
