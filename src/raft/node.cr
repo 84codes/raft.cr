@@ -10,7 +10,7 @@ module Raft
 
     getter peers : Array(NodeID)
     getter paused : Bool = false
-    property metrics : Metrics? = nil
+    getter metrics : Metrics?
     @config : Config
     @state_machine : StateMachine(T)
     @outbox : Array(Message) = [] of Message
@@ -22,7 +22,7 @@ module Raft
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
 
-    def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T))
+    def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil)
       @log = Log(T).new(@config)
       @election_timeout = random_election_timeout
       recover_state

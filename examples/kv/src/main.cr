@@ -39,8 +39,7 @@ config.heartbeat_ticks = 2_u32
 # Create state machine and node
 state_machine = KVStateMachine.new
 metrics = Raft::Metrics.new(node_id: node_id)
-node = Raft::Node(KVCommand).new(id: node_id, peers: peer_ids, config: config, state_machine: state_machine)
-node.metrics = metrics
+node = Raft::Node(KVCommand).new(id: node_id, peers: peer_ids, config: config, state_machine: state_machine, metrics: metrics)
 
 # Setup TCP transport
 transport = Raft::TCPTransport.new(node_id: node_id, listen_address: "0.0.0.0", listen_port: raft_port)

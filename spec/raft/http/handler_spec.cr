@@ -39,9 +39,8 @@ describe Raft::HTTP::Handler do
     config.election_timeout_max_ticks = 100_u32
 
     sm = TestStateMachine.new
-    node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: config, state_machine: sm)
     metrics = Raft::Metrics.new(node_id: 1_u64)
-    node.metrics = metrics
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: config, state_machine: sm, metrics: metrics)
 
     handler = Raft::HTTP::Handler(TestData).new(node)
     server = ::HTTP::Server.new([handler])
