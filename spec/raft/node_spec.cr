@@ -285,6 +285,31 @@ describe Raft::Node do
     end
   end
 
+  describe "partition" do
+    it "drops messages when partitioned" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 100_u32
+      config.election_timeout_max_ticks = 100_u32
+
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
+      node.partition
+
+      heartbeat = Raft::Message.new(
+        type: Raft::MessageType::AppendEntries,
+        from: 2_u64,
+        term: 1_u64,
+      )
+      node.step(heartbeat)
+      node.take_messages.size.should eq 0 # no response generated
+
+      node.heal
+      node.step(heartbeat)
+      node.take_messages.size.should be > 0 # responds now
+
+      node.close
+    end
+  end
+
   describe "peers" do
     it "exposes peer list" do
       node = create_test_node(1_u64, [2_u64, 3_u64])

@@ -25,6 +25,12 @@ module Raft
         when {"POST", "/raft/admin/resume"}
           @node.resume
           json_response(context, 200, {"status" => "resumed"})
+        when {"POST", "/raft/admin/partition"}
+          @node.partition
+          json_response(context, 200, {"status" => "partitioned"})
+        when {"POST", "/raft/admin/heal"}
+          @node.heal
+          json_response(context, 200, {"status" => "healed"})
         else
           call_next(context)
         end

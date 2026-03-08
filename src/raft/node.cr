@@ -10,6 +10,7 @@ module Raft
 
     getter peers : Array(NodeID)
     getter paused : Bool = false
+    getter partitioned : Bool = false
     getter metrics : Metrics?
     @config : Config
     @state_machine : StateMachine(T)
@@ -36,6 +37,14 @@ module Raft
       @paused = false
     end
 
+    def partition
+      @partitioned = true
+    end
+
+    def heal
+      @partitioned = false
+    end
+
     def tick
       return if @paused
       case @role
@@ -56,6 +65,7 @@ module Raft
 
     def step(message : Message)
       return if @paused
+      return if @partitioned
       # If message has a higher term, step down
       if message.term > @current_term
         @current_term = message.term
@@ -83,6 +93,10 @@ module Raft
     end
 
     def take_messages : Array(Message)
+      if @partitioned
+        @outbox.clear
+        return [] of Message
+      end
       messages = @outbox.dup
       @outbox.clear
       messages
