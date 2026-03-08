@@ -1,0 +1,58 @@
+# examples/kv/docker-compose.yml
+services:
+  node-1:
+    build:
+      context: ../..
+      dockerfile: examples/kv/Dockerfile
+    environment:
+      NODE_ID: "1"
+      PEERS: "node-2:9000,node-3:9000"
+      HTTP_PORT: "8001"
+      RAFT_PORT: "9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8001:8001"
+    volumes:
+      - node1-data:/data/raft
+
+  node-2:
+    build:
+      context: ../..
+      dockerfile: examples/kv/Dockerfile
+    environment:
+      NODE_ID: "2"
+      PEERS: "node-1:9000,node-3:9000"
+      HTTP_PORT: "8002"
+      RAFT_PORT: "9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8002:8002"
+    volumes:
+      - node2-data:/data/raft
+
+  node-3:
+    build:
+      context: ../..
+      dockerfile: examples/kv/Dockerfile
+    environment:
+      NODE_ID: "3"
+      PEERS: "node-1:9000,node-2:9000"
+      HTTP_PORT: "8003"
+      RAFT_PORT: "9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8003:8003"
+    volumes:
+      - node3-data:/data/raft
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
