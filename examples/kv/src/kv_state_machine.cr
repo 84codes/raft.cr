@@ -14,6 +14,10 @@ class KVStateMachine < Raft::StateMachine(KVCommand)
     @store[key]?
   end
 
+  def all : Hash(String, String)
+    @store
+  end
+
   def snapshot(io : IO)
     io.write_bytes(@store.size.to_u32, IO::ByteFormat::LittleEndian)
     @store.each do |key, value|
