@@ -4,6 +4,10 @@ version: 0.1.0
 authors:
   - Anton Dalgren <anton@84codes.com>
 
+targets:
+  raft-tui:
+    main: src/raft/tui/main.cr
+
 crystal: '>= 1.19.1'
 
 license: MIT
