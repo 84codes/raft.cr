@@ -2,6 +2,7 @@ module Raft
   enum EntryType : UInt8
     Normal        = 0
     Configuration = 1
+    Noop          = 2
   end
 
   enum MessageType : UInt8
@@ -11,6 +12,8 @@ module Raft
     RequestVoteResponse     = 3
     InstallSnapshot         = 4
     InstallSnapshotResponse = 5
+    PreVote                 = 6
+    PreVoteResponse         = 7
   end
 
   enum Role

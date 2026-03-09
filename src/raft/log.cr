@@ -11,7 +11,7 @@ module Raft
       new_segment(1_u64)
     end
 
-    def append(term : UInt64, data : T, entry_type : EntryType) : LogEntry(T)
+    def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal) : LogEntry(T)
       if current_segment.full?
         new_segment(@last_index + 1)
       end

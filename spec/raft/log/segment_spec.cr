@@ -12,8 +12,8 @@ describe Raft::Log::Segment do
     segment.append(entry1)
     segment.append(entry2)
 
-    segment.read(1_u64).data.value.should eq "first"
-    segment.read(2_u64).data.value.should eq "second"
+    segment.read(1_u64).data.not_nil!.value.should eq "first"
+    segment.read(2_u64).data.not_nil!.value.should eq "second"
     segment.count.should eq 2
     segment.last_index.should eq 2_u64
 
@@ -44,7 +44,7 @@ describe Raft::Log::Segment do
     segment.close
 
     segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64, max_size: 1024_u32)
-    segment2.read(1_u64).data.value.should eq "persist"
+    segment2.read(1_u64).data.not_nil!.value.should eq "persist"
     segment2.count.should eq 1
 
     segment2.close

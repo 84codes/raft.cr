@@ -20,8 +20,10 @@ describe Raft::Server do
 
     3.times { server.tick }
 
-    server.node(1_u64).role.should eq Raft::Role::Candidate
-    server.node(2_u64).role.should eq Raft::Role::Candidate
+    # With pre-vote, nodes stay Follower but produce PreVote messages
+    messages = server.take_all_messages
+    messages.all? { |_, m| m.type == Raft::MessageType::PreVote }.should be_true
+    messages.size.should be > 0
 
     server.close
     FileUtils.rm_rf(dir)

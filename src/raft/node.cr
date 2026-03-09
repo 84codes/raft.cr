@@ -14,12 +14,13 @@ module Raft
     getter metrics : Metrics?
     @config : Config
     @state_machine : StateMachine(T)
-    @outbox : Array(Message) = [] of Message
+    @outbox : Array({NodeID, Message}) = [] of {NodeID, Message}
     @election_tick : UInt32 = 0_u32
     @heartbeat_tick : UInt32 = 0_u32
     @election_timeout : UInt32
     @random : Random = Random.new
     @votes_received : Set(NodeID) = Set(NodeID).new
+    @pre_votes_received : Set(NodeID) = Set(NodeID).new
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
 
@@ -50,10 +51,10 @@ module Raft
       case @role
       when Role::Follower
         @election_tick += 1
-        become_candidate if @election_tick >= @election_timeout
+        start_pre_vote if @election_tick >= @election_timeout
       when Role::Candidate
         @election_tick += 1
-        become_candidate if @election_tick >= @election_timeout
+        start_pre_vote if @election_tick >= @election_timeout
       when Role::Leader
         @heartbeat_tick += 1
         if @heartbeat_tick >= @config.heartbeat_ticks
@@ -66,11 +67,14 @@ module Raft
     def step(message : Message)
       return if @paused
       return if @partitioned
-      # If message has a higher term, step down
-      if message.term > @current_term
-        @current_term = message.term
-        become_follower(message.from)
-        persist_state
+
+      # PreVote messages don't cause term changes — they're speculative
+      unless message.type == MessageType::PreVote || message.type == MessageType::PreVoteResponse
+        if message.term > @current_term
+          @current_term = message.term
+          become_follower(message.from)
+          persist_state
+        end
       end
 
       case message.type
@@ -82,6 +86,10 @@ module Raft
         handle_request_vote(message)
       when MessageType::RequestVoteResponse
         handle_request_vote_response(message)
+      when MessageType::PreVote
+        handle_pre_vote(message)
+      when MessageType::PreVoteResponse
+        handle_pre_vote_response(message)
       end
     end
 
@@ -92,10 +100,10 @@ module Raft
       true
     end
 
-    def take_messages : Array(Message)
+    def take_messages : Array({NodeID, Message})
       if @partitioned
         @outbox.clear
-        return [] of Message
+        return [] of {NodeID, Message}
       end
       messages = @outbox.dup
       @outbox.clear
@@ -104,6 +112,23 @@ module Raft
 
     def close
       @log.close
+    end
+
+    private def start_pre_vote
+      @election_tick = 0_u32
+      @election_timeout = random_election_timeout
+      @pre_votes_received = Set(NodeID).new
+      @pre_votes_received.add(@id) # vote for self
+
+      @peers.each do |peer|
+        @outbox << {peer, Message.new(
+          type: MessageType::PreVote,
+          from: @id,
+          term: @current_term + 1, # proposed term, not yet committed
+          last_log_index: @log.last_index,
+          last_log_term: @log.last_term,
+        )}
+      end
     end
 
     private def become_candidate
@@ -118,13 +143,13 @@ module Raft
       @metrics.try(&.increment("raft_elections_total"))
 
       @peers.each do |peer|
-        @outbox << Message.new(
+        @outbox << {peer, Message.new(
           type: MessageType::RequestVote,
           from: @id,
           term: @current_term,
           last_log_index: @log.last_index,
           last_log_term: @log.last_term,
-        )
+        )}
       end
     end
 
@@ -145,6 +170,8 @@ module Raft
         @next_index[peer] = @log.last_index + 1
         @match_index[peer] = 0_u64
       end
+      # Append no-op to force log convergence — truncates stale entries on followers
+      @log.append(term: @current_term, entry_type: EntryType::Noop)
       send_append_entries
     end
 
@@ -154,13 +181,13 @@ module Raft
       @election_tick = 0_u32
 
       if msg.term < @current_term
-        @outbox << Message.new(
+        @outbox << {msg.from, Message.new(
           type: MessageType::AppendEntriesResponse,
           from: @id,
           term: @current_term,
           success: false,
           reject_hint: @log.last_index,
-        )
+        )}
         return
       end
 
@@ -169,23 +196,23 @@ module Raft
       # Check prev_log consistency
       if msg.prev_log_index > 0
         if msg.prev_log_index > @log.last_index
-          @outbox << Message.new(
+          @outbox << {msg.from, Message.new(
             type: MessageType::AppendEntriesResponse,
             from: @id,
             term: @current_term,
             success: false,
             reject_hint: @log.last_index,
-          )
+          )}
           return
         end
         if @log.term_at(msg.prev_log_index) != msg.prev_log_term
-          @outbox << Message.new(
+          @outbox << {msg.from, Message.new(
             type: MessageType::AppendEntriesResponse,
             from: @id,
             term: @current_term,
             success: false,
             reject_hint: msg.prev_log_index - 1,
-          )
+          )}
           return
         end
       end
@@ -213,22 +240,25 @@ module Raft
         @commit_index = new_commit
       end
 
-      @outbox << Message.new(
+      @outbox << {msg.from, Message.new(
         type: MessageType::AppendEntriesResponse,
         from: @id,
         term: @current_term,
         success: true,
         last_log_index: @log.last_index,
-      )
+      )}
     end
 
     private def handle_append_entries_response(msg : Message)
       return unless @role == Role::Leader
 
       if msg.success
-        if msg.last_log_index > @match_index.fetch(msg.from, 0_u64)
-          @match_index[msg.from] = msg.last_log_index
-          @next_index[msg.from] = msg.last_log_index + 1
+        # Clamp to our own log length — follower may report a higher index
+        # from a previous leader's uncommitted entries
+        reported_index = Math.min(msg.last_log_index, @log.last_index)
+        if reported_index > @match_index.fetch(msg.from, 0_u64)
+          @match_index[msg.from] = reported_index
+          @next_index[msg.from] = reported_index + 1
         end
         advance_commit_index
       else
@@ -256,8 +286,10 @@ module Raft
     private def apply_entries(from : UInt64, to : UInt64)
       (from..to).each do |i|
         entry = @log.get(i)
-        @state_machine.apply(entry.data)
-        @metrics.try(&.increment("raft_entries_applied_total"))
+        if data = entry.data
+          @state_machine.apply(data)
+          @metrics.try(&.increment("raft_entries_applied_total"))
+        end
       end
     end
 
@@ -276,12 +308,12 @@ module Raft
         end
       end
 
-      @outbox << Message.new(
+      @outbox << {msg.from, Message.new(
         type: MessageType::RequestVoteResponse,
         from: @id,
         term: @current_term,
         success: vote_granted,
-      )
+      )}
     end
 
     private def handle_request_vote_response(msg : Message)
@@ -308,7 +340,7 @@ module Raft
           entries_count += 1
         end
 
-        @outbox << Message.new(
+        @outbox << {peer, Message.new(
           type: MessageType::AppendEntries,
           from: @id,
           term: @current_term,
@@ -317,9 +349,40 @@ module Raft
           commit_index: @commit_index,
           entries_data: entries_io.to_slice.dup,
           entries_count: entries_count,
-        )
+        )}
         @metrics.try(&.increment("raft_messages_sent_total"))
         @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
+      end
+    end
+
+    private def handle_pre_vote(msg : Message)
+      vote_granted = false
+
+      # Grant pre-vote if:
+      # 1. The candidate's proposed term is at least as high as ours
+      # 2. The candidate's log is at least as up-to-date as ours
+      if msg.term >= @current_term
+        if msg.last_log_term > @log.last_term ||
+           (msg.last_log_term == @log.last_term && msg.last_log_index >= @log.last_index)
+          vote_granted = true
+        end
+      end
+
+      @outbox << {msg.from, Message.new(
+        type: MessageType::PreVoteResponse,
+        from: @id,
+        term: msg.term,
+        success: vote_granted,
+      )}
+    end
+
+    private def handle_pre_vote_response(msg : Message)
+      return unless msg.term == @current_term + 1 # must match our proposed term
+
+      if msg.success
+        @pre_votes_received.add(msg.from)
+        quorum = (@peers.size + 1) // 2 + 1
+        become_candidate if @pre_votes_received.size >= quorum
       end
     end
 

@@ -13,8 +13,8 @@ describe Raft::Log do
     log.append(term: 1_u64, data: TestData.new("a"), entry_type: Raft::EntryType::Normal)
     log.append(term: 1_u64, data: TestData.new("b"), entry_type: Raft::EntryType::Normal)
 
-    log.get(1_u64).data.value.should eq "a"
-    log.get(2_u64).data.value.should eq "b"
+    log.get(1_u64).data.not_nil!.value.should eq "a"
+    log.get(2_u64).data.not_nil!.value.should eq "b"
     log.last_index.should eq 2_u64
     log.last_term.should eq 1_u64
 
@@ -35,9 +35,9 @@ describe Raft::Log do
     log.append(term: 1_u64, data: TestData.new("b"), entry_type: Raft::EntryType::Normal)
     log.append(term: 2_u64, data: TestData.new("c"), entry_type: Raft::EntryType::Normal)
 
-    log.get(1_u64).data.value.should eq "a"
-    log.get(2_u64).data.value.should eq "b"
-    log.get(3_u64).data.value.should eq "c"
+    log.get(1_u64).data.not_nil!.value.should eq "a"
+    log.get(2_u64).data.not_nil!.value.should eq "b"
+    log.get(3_u64).data.not_nil!.value.should eq "c"
     log.segment_count.should be > 1
 
     log.close
@@ -58,7 +58,7 @@ describe Raft::Log do
 
     log.truncate_after(1_u64)
     log.last_index.should eq 1_u64
-    log.get(1_u64).data.value.should eq "a"
+    log.get(1_u64).data.not_nil!.value.should eq "a"
 
     log.close
     FileUtils.rm_rf(dir)

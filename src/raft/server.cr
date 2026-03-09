@@ -35,12 +35,12 @@ module Raft
       end
     end
 
-    def take_all_messages : Array(Message)
-      all = [] of Message
+    def take_all_messages : Array({NodeID, Message})
+      all = [] of {NodeID, Message}
       @nodes.each do |group_id, node|
-        node.take_messages.each do |msg|
+        node.take_messages.each do |target_id, msg|
           msg.group_id = group_id
-          all << msg
+          all << {target_id, msg}
         end
       end
       all

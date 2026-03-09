@@ -17,7 +17,7 @@ describe Raft::LogEntry do
     restored.term.should eq 1_u64
     restored.index.should eq 1_u64
     restored.entry_type.should eq Raft::EntryType::Normal
-    restored.data.value.should eq "hello"
+    restored.data.not_nil!.value.should eq "hello"
   end
 
   it "reports correct byte size" do

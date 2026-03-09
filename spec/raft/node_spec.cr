@@ -20,19 +20,29 @@ def elect_leader(nodes : Hash(Raft::NodeID, Raft::Node(TestData)), leader_id : R
   config_ticks = 5
   config_ticks.times { nodes[leader_id].tick }
 
-  # Deliver RequestVote to all peers
-  nodes[leader_id].take_messages.each do |msg|
-    nodes.each_value do |node|
-      next if node.id == leader_id
-      node.step(msg)
+  # Deliver PreVote to peers
+  nodes[leader_id].take_messages.each do |target_id, msg|
+    nodes[target_id].step(msg)
+  end
+
+  # Deliver PreVoteResponses back — triggers become_candidate + RequestVote
+  nodes.each do |id, node|
+    next if id == leader_id
+    node.take_messages.each do |target_id, msg|
+      nodes[target_id].step(msg) if msg.type == Raft::MessageType::PreVoteResponse
     end
   end
 
-  # Deliver vote responses back
+  # Deliver RequestVote to peers
+  nodes[leader_id].take_messages.each do |target_id, msg|
+    nodes[target_id].step(msg)
+  end
+
+  # Deliver RequestVoteResponses back — triggers become_leader
   nodes.each do |id, node|
     next if id == leader_id
-    node.take_messages.each do |msg|
-      nodes[leader_id].step(msg) if msg.type == Raft::MessageType::RequestVoteResponse
+    node.take_messages.each do |target_id, msg|
+      nodes[target_id].step(msg) if msg.type == Raft::MessageType::RequestVoteResponse
     end
   end
 end
@@ -48,7 +58,7 @@ describe Raft::Node do
   end
 
   describe "election timeout" do
-    it "becomes candidate after election timeout ticks" do
+    it "sends pre-vote after election timeout ticks" do
       config = Raft::Config.new
       config.election_timeout_min_ticks = 5_u32
       config.election_timeout_max_ticks = 5_u32
@@ -60,11 +70,13 @@ describe Raft::Node do
 
       node.tick
       messages = node.take_messages
-      node.role.should eq Raft::Role::Candidate
-      node.current_term.should eq 1_u64
+      # Node stays Follower until pre-vote succeeds — term unchanged
+      node.role.should eq Raft::Role::Follower
+      node.current_term.should eq 0_u64
 
       messages.size.should eq 2
-      messages.all? { |m| m.type == Raft::MessageType::RequestVote }.should be_true
+      messages.all? { |_, m| m.type == Raft::MessageType::PreVote }.should be_true
+      messages.all? { |_, m| m.term == 1_u64 }.should be_true # proposed term
 
       node.close
     end
@@ -134,7 +146,7 @@ describe Raft::Node do
       heartbeats = nodes[1_u64].take_messages
 
       heartbeats.size.should eq 2
-      heartbeats.all? { |m| m.type == Raft::MessageType::AppendEntries }.should be_true
+      heartbeats.all? { |_, m| m.type == Raft::MessageType::AppendEntries }.should be_true
 
       nodes.each_value(&.close)
     end
@@ -158,8 +170,9 @@ describe Raft::Node do
       messages = nodes[1_u64].take_messages
 
       messages.size.should eq 2
-      messages.all? { |m| m.type == Raft::MessageType::AppendEntries }.should be_true
-      messages.all? { |m| m.entries_count == 1_u32 }.should be_true
+      messages.all? { |_, m| m.type == Raft::MessageType::AppendEntries }.should be_true
+      # entries_count includes the no-op from leader election + the proposed entry
+      messages.all? { |_, m| m.entries_count >= 1_u32 }.should be_true
 
       nodes.each_value(&.close)
     end
@@ -199,22 +212,20 @@ describe Raft::Node do
       nodes[1_u64].propose(TestData.new("cmd1"))
       append_messages = nodes[1_u64].take_messages
 
-      # Deliver AppendEntries to followers
-      append_messages.each do |msg|
-        [2_u64, 3_u64].each do |id|
-          nodes[id].step(msg)
-        end
+      # Deliver AppendEntries to correct followers
+      append_messages.each do |target_id, msg|
+        nodes[target_id].step(msg)
       end
 
       # Followers respond with success
       [2_u64, 3_u64].each do |id|
-        nodes[id].take_messages.each do |msg|
-          nodes[1_u64].step(msg) if msg.type == Raft::MessageType::AppendEntriesResponse
+        nodes[id].take_messages.each do |target_id, msg|
+          nodes[target_id].step(msg) if msg.type == Raft::MessageType::AppendEntriesResponse
         end
       end
 
-      # Leader should have committed and applied
-      nodes[1_u64].commit_index.should eq 1_u64
+      # Leader should have committed and applied (index 1 = no-op, index 2 = cmd1)
+      nodes[1_u64].commit_index.should eq 2_u64
       sm1.applied.size.should eq 1
       sm1.applied[0].value.should eq "cmd1"
 
@@ -256,7 +267,7 @@ describe Raft::Node do
 
       responses = node2.take_messages
       responses.size.should eq 1
-      responses[0].success.should be_true
+      responses[0][1].success.should be_true
 
       sm2.applied.size.should eq 1
       sm2.applied[0].value.should eq "x"
@@ -279,7 +290,10 @@ describe Raft::Node do
 
       node.resume
       3.times { node.tick }
-      node.role.should eq Raft::Role::Candidate
+      # With pre-vote, timeout sends PreVote but stays Follower
+      messages = node.take_messages
+      messages.size.should eq 2
+      messages.all? { |_, m| m.type == Raft::MessageType::PreVote }.should be_true
 
       node.close
     end
@@ -310,6 +324,27 @@ describe Raft::Node do
     end
   end
 
+  describe "pre-vote" do
+    it "prevents term inflation during partition" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 3_u32
+      config.election_timeout_max_ticks = 3_u32
+
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
+      node.partition
+
+      # Tick many election timeouts — node sends PreVotes but they're dropped
+      30.times { node.tick }
+      node.take_messages # clear (all dropped by partition anyway)
+
+      # Term should NOT have inflated — still 0
+      node.current_term.should eq 0_u64
+      node.role.should eq Raft::Role::Follower
+
+      node.close
+    end
+  end
+
   describe "peers" do
     it "exposes peer list" do
       node = create_test_node(1_u64, [2_u64, 3_u64])
@@ -335,7 +370,21 @@ describe Raft::Node do
       sm = TestStateMachine.new
       node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1, state_machine: sm)
 
+      # Trigger pre-vote
       5.times { node.tick }
+      pre_votes = node.take_messages
+
+      # Simulate pre-vote success from both peers — triggers become_candidate
+      pre_votes.each do |_, msg|
+        response = Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: msg.type == Raft::MessageType::PreVote ? 2_u64 : 3_u64,
+          term: 1_u64,
+          success: true,
+        )
+        node.step(response)
+      end
+
       node.current_term.should eq 1_u64
       node.voted_for.should eq 1_u64
       node.close
