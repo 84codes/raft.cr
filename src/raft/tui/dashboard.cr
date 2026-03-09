@@ -23,19 +23,16 @@ module Raft
       @nodes : Array(NodeStatus)
       @events : Array(String) = [] of String
       @running : Bool = true
-      @previous_states : Hash(String, String) = {} of String => String
 
       def initialize(addresses : Array(String))
         @nodes = addresses.map { |addr| NodeStatus.new(addr) }
       end
 
       def run
-        # Enter raw mode
-        print "\e[?25l"     # hide cursor
-        print "\e[2J"       # clear screen
+        print "\e[?25l"   # hide cursor
+        print "\e[2J"     # clear screen
         STDIN.raw!
 
-        # Poll loop in background
         spawn do
           while @running
             poll_nodes
@@ -44,15 +41,13 @@ module Raft
           end
         end
 
-        # Input loop
         while @running
           handle_input
         end
       ensure
-        print "\e[?25l"
-        print "\e[?25h"     # show cursor
+        print "\e[?25h"   # show cursor
         STDIN.cooked!
-        puts "\nGoodbye."
+        STDOUT.puts "\r\nGoodbye."
       end
 
       private def poll_nodes
@@ -75,7 +70,6 @@ module Raft
               node.paused = data["paused"].as_bool
               node.reachable = true
 
-              # Detect state changes
               if old_role != "unknown" && old_role != node.role
                 add_event("Node #{node.id} became #{node.role} (term #{node.term})")
               end
@@ -89,49 +83,53 @@ module Raft
       end
 
       private def render
-        print "\e[H" # move to top-left
+        buf = String.build do |io|
+          io << "\e[H" # cursor to top-left
 
-        # Header
-        puts "\e[1m\e[36m── Raft Cluster Dashboard ─────────────────────────────\e[0m"
-        puts ""
+          line(io, "\e[1m\e[36m── Raft Cluster Dashboard ─────────────────────────────\e[0m")
+          line(io, "")
 
-        # Node status
-        @nodes.each do |node|
-          if !node.reachable
-            puts "  Node #{node.id} (#{node.address})    \e[31m██ UNREACHABLE\e[0m                    "
-            puts "                                                                  "
-          elsif node.paused
-            puts "  Node #{node.id} (#{node.address})    \e[33m██ PAUSED\e[0m       term: #{node.term}        "
-            puts "  commit: #{node.commit_index}  log: #{node.last_log_index}                                    "
-          else
-            role_display = case node.role
-                           when "leader"    then "\e[32m██ LEADER\e[0m"
-                           when "candidate" then "\e[33m░░ CANDIDATE\e[0m"
-                           else                  "\e[34m░░ FOLLOWER\e[0m"
-                           end
-            puts "  Node #{node.id} (#{node.address})    #{role_display}   term: #{node.term}        "
-            if node.role == "leader"
-              puts "  commit: #{node.commit_index}  log: #{node.last_log_index}                                    "
+          @nodes.each do |node|
+            if !node.reachable
+              line(io, "  Node #{node.id} (#{node.address})    \e[31m██ UNREACHABLE\e[0m")
+              line(io, "")
+            elsif node.paused
+              line(io, "  Node #{node.id} (#{node.address})    \e[33m██ PAUSED\e[0m       term: #{node.term}")
+              line(io, "  commit: #{node.commit_index}  log: #{node.last_log_index}")
             else
-              puts "  commit: #{node.commit_index}  log: #{node.last_log_index}  leader: #{node.leader_id}              "
+              role_display = case node.role
+                             when "leader"    then "\e[32m██ LEADER\e[0m"
+                             when "candidate" then "\e[33m░░ CANDIDATE\e[0m"
+                             else                  "\e[34m░░ FOLLOWER\e[0m"
+                             end
+              line(io, "  Node #{node.id} (#{node.address})    #{role_display}   term: #{node.term}")
+              if node.role == "leader"
+                line(io, "  commit: #{node.commit_index}  log: #{node.last_log_index}")
+              else
+                line(io, "  commit: #{node.commit_index}  log: #{node.last_log_index}  leader: #{node.leader_id}")
+              end
             end
+            line(io, "")
           end
-          puts ""
-        end
 
-        # Event log
-        puts "\e[1m\e[36m── Event Log ─────────────────────────────────────────\e[0m"
-        last_events = @events.last(6)
-        last_events.each do |event|
-          puts "  #{event}                                              "
-        end
-        (6 - last_events.size).times { puts "                                                       " }
+          line(io, "\e[1m\e[36m── Event Log ─────────────────────────────────────────\e[0m")
+          last_events = @events.last(6)
+          last_events.each do |event|
+            line(io, "  #{event}")
+          end
+          (6 - last_events.size).times { line(io, "") }
 
-        # Controls
-        puts ""
-        puts "\e[1m\e[36m── Controls ──────────────────────────────────────────\e[0m"
-        puts "  \e[1m[1-#{@nodes.size}]\e[0m Select node  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal"
-        puts "  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all   \e[1m[q]\e[0m Quit"
+          line(io, "")
+          line(io, "\e[1m\e[36m── Controls ──────────────────────────────────────────\e[0m")
+          line(io, "  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal")
+          line(io, "  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all   \e[1m[q]\e[0m Quit")
+        end
+        STDOUT.write(buf.to_slice)
+      end
+
+      # Write a line with \e[K to clear remainder, \r\n for raw-mode newline
+      private def line(io : String::Builder, text : String)
+        io << text << "\e[K\r\n"
       end
 
       private def handle_input
@@ -139,39 +137,30 @@ module Raft
         return unless char
 
         case char
-        when 'q'
+        when 'q', '\u{3}' # q or Ctrl+C
           @running = false
         when 'k'
           kill_leader
         when 'a'
           heal_all
         when 'p'
-          print "\e[#{@nodes.size * 3 + 14};3H\e[KPause which node? [1-#{@nodes.size}] "
-          if num = STDIN.read_char
-            if idx = num.to_i?
-              pause_node(idx)
-            end
-          end
+          prompt_node("Pause") { |id| pause_node(id) }
         when 'r'
-          print "\e[#{@nodes.size * 3 + 14};3H\e[KResume which node? [1-#{@nodes.size}] "
-          if num = STDIN.read_char
-            if idx = num.to_i?
-              resume_node(idx)
-            end
-          end
+          prompt_node("Resume") { |id| resume_node(id) }
         when 'x'
-          print "\e[#{@nodes.size * 3 + 14};3H\e[KPartition which node? [1-#{@nodes.size}] "
-          if num = STDIN.read_char
-            if idx = num.to_i?
-              partition_node(idx)
-            end
-          end
+          prompt_node("Partition") { |id| partition_node(id) }
         when 'h'
-          print "\e[#{@nodes.size * 3 + 14};3H\e[KHeal which node? [1-#{@nodes.size}] "
-          if num = STDIN.read_char
-            if idx = num.to_i?
-              heal_node(idx)
-            end
+          prompt_node("Heal") { |id| heal_node(id) }
+        end
+      end
+
+      private def prompt_node(action : String, &block : Int32 ->)
+        # Write prompt on a status line below controls
+        row = @nodes.size * 3 + 14
+        STDOUT.write("\e[#{row};1H\e[K  #{action} which node? [1-#{@nodes.size}] ".to_slice)
+        if num = STDIN.read_char
+          if idx = num.to_i?
+            block.call(idx)
           end
         end
       end
