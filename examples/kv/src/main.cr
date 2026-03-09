@@ -4,6 +4,9 @@ require "./kv_command"
 require "./kv_state_machine"
 require "./kv_http_handler"
 require "http/server"
+require "log"
+
+Log.setup_from_env(default_level: :info)
 
 # Read configuration from environment
 node_id = (ENV["NODE_ID"]? || "1").to_u64
@@ -48,26 +51,6 @@ peer_configs.each do |pc|
 end
 transport.start
 
-# Tick loop
-spawn do
-  loop do
-    sleep 50.milliseconds
-    node.tick
-
-    # Send outgoing messages
-    node.take_messages.each do |msg|
-      peer_ids.each do |pid|
-        transport.send(to: pid, message: msg)
-      end
-    end
-
-    # Process incoming messages
-    transport.receive(for_node: node_id).each do |msg|
-      node.step(msg)
-    end
-  end
-end
-
 # HTTP server
 raft_handler = Raft::HTTP::Handler(KVCommand).new(node)
 kv_handler = KVHttpHandler.new(node, state_machine)
@@ -75,6 +58,71 @@ kv_handler = KVHttpHandler.new(node, state_machine)
 server = ::HTTP::Server.new([raft_handler, kv_handler]) do |context|
   context.response.status_code = 404
   context.response.print "Not found"
+end
+
+# Graceful shutdown on SIGINT/SIGTERM
+shutdown = ->(_signal : Signal) do
+  puts "\nShutting down node #{node_id}..."
+  server.close
+  transport.stop
+  node.close
+  exit 0
+end
+
+Signal::INT.trap(&shutdown)
+Signal::TERM.trap(&shutdown)
+
+# Tick loop
+last_role = node.role
+last_term = node.current_term
+last_leader = node.leader_id
+
+tick_ch = Channel(Nil).new(1)
+
+spawn(name: "raft-tick") do
+  last_tick = Time.instant
+  loop do
+    sleep 50.milliseconds
+    now = Time.instant
+    elapsed = now - last_tick
+    last_tick = now
+    # Skip tick if system was suspended (e.g. laptop sleep)
+    if elapsed > 1.second
+      Log.warn { "clock jump detected (#{elapsed.total_seconds.round(1)}s), skipping tick" }
+      next
+    end
+    select
+    when tick_ch.send(nil)
+    else
+    end
+  end
+end
+
+spawn(name: "raft-event-loop") do
+  loop do
+    # Wait for either a tick or incoming message notification
+    select
+    when tick_ch.receive
+      node.tick
+    when transport.notify.receive
+      transport.receive(for_node: node_id).each do |msg|
+        node.step(msg)
+      end
+    end
+
+    # Send outgoing messages immediately
+    node.take_messages.each do |target_id, msg|
+      transport.send(to: target_id, message: msg)
+    end
+
+    # Log state changes
+    if node.role != last_role || node.current_term != last_term || node.leader_id != last_leader
+      Log.info { "role=#{node.role} term=#{node.current_term} leader=#{node.leader_id}" }
+      last_role = node.role
+      last_term = node.current_term
+      last_leader = node.leader_id
+    end
+  end
 end
 
 puts "Node #{node_id} starting on HTTP :#{http_port}, Raft :#{raft_port}"

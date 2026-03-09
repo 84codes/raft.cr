@@ -11,6 +11,7 @@ module Raft
     @inbox_mutex : Mutex = Mutex.new
     @server : TCPServer? = nil
     @running : Bool = false
+    getter notify : Channel(Nil) = Channel(Nil).new(1)
 
     def initialize(@node_id : NodeID, @listen_address : String, @listen_port : Int32)
     end
@@ -22,10 +23,13 @@ module Raft
     def start
       @running = true
       @server = server = TCPServer.new(@listen_address, @listen_port)
-      spawn do
+      spawn(name: "raft-transport-accept") do
         while @running
-          if client = server.accept?
-            spawn handle_connection(client)
+          if conn = server.accept?
+            client = conn
+            spawn(name: "raft-transport-conn") do
+              handle_connection(client)
+            end
           end
         end
       end
@@ -82,6 +86,11 @@ module Raft
         msg = Message.from_io(client)
         @inbox_mutex.synchronize do
           @inbox << msg
+        end
+        select
+        when @notify.send(nil)
+        else
+          # Already notified, don't block
         end
       end
     rescue IO::EOFError | IO::Error
