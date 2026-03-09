@@ -31,6 +31,9 @@ module Raft
         when {"POST", "/raft/admin/heal"}
           @node.heal
           json_response(context, 200, {"status" => "healed"})
+        when {"POST", "/raft/admin/reset"}
+          @node.reset
+          json_response(context, 200, {"status" => "reset"})
         else
           call_next(context)
         end

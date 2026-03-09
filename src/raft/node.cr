@@ -46,6 +46,26 @@ module Raft
       @partitioned = false
     end
 
+    def reset
+      @role = Role::Follower
+      @current_term = 0_u64
+      @voted_for = nil
+      @leader_id = nil
+      @commit_index = 0_u64
+      @election_tick = 0_u32
+      @heartbeat_tick = 0_u32
+      @election_timeout = random_election_timeout
+      @votes_received = Set(NodeID).new
+      @pre_votes_received = Set(NodeID).new
+      @next_index.clear
+      @match_index.clear
+      @outbox.clear
+      @paused = false
+      @partitioned = false
+      @log.reset
+      persist_state
+    end
+
     def tick
       return if @paused
       case @role

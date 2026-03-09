@@ -65,6 +65,16 @@ module Raft
       @segments.size
     end
 
+    def reset
+      @segments.each(&.close)
+      @segments.clear
+      # Delete all segment files and metadata
+      Dir.glob(File.join(@config.data_dir, "*.log")) { |f| File.delete(f) }
+      @last_index = 0_u64
+      @last_term = 0_u64
+      new_segment(1_u64)
+    end
+
     def close
       @segments.each(&.close)
     end
