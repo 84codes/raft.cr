@@ -10,8 +10,7 @@ describe Raft::Server do
     config.election_timeout_min_ticks = 3_u32
     config.election_timeout_max_ticks = 3_u32
 
-    transport = Raft::MemoryTransport.new
-    server = Raft::Server(TestData).new(transport: transport, config: config)
+    server = Raft::Server(TestData).new(config: config)
 
     sm1 = TestStateMachine.new
     sm2 = TestStateMachine.new
@@ -29,7 +28,7 @@ describe Raft::Server do
     FileUtils.rm_rf(dir)
   end
 
-  it "routes incoming messages by group_id" do
+  it "routes incoming messages via node inbox channel" do
     dir = File.tempname("raft_server")
     Dir.mkdir_p(dir)
 
@@ -38,21 +37,25 @@ describe Raft::Server do
     config.election_timeout_min_ticks = 100_u32
     config.election_timeout_max_ticks = 100_u32
 
-    transport = Raft::MemoryTransport.new
-    server = Raft::Server(TestData).new(transport: transport, config: config)
+    server = Raft::Server(TestData).new(config: config)
 
     sm = TestStateMachine.new
     server.add_group(group_id: 1_u64, node_id: 1_u64, peers: [2_u64, 3_u64], state_machine: sm)
 
+    node = server.node(1_u64)
+
+    # Send message directly to node's inbox channel
     msg = Raft::Message.new(
       type: Raft::MessageType::AppendEntries,
       from: 2_u64,
       term: 1_u64,
       group_id: 1_u64,
     )
-    transport.send(to: 1_u64, message: msg)
+    node.inbox.send(msg)
 
-    server.process_messages(for_node: 1_u64)
+    # Node processes the message from its channel
+    received = node.inbox.receive
+    node.step(received)
 
     outgoing = server.take_all_messages
     outgoing.size.should be > 0

@@ -1,10 +1,9 @@
 module Raft
   class Server(T)
     @nodes : Hash(UInt64, Node(T)) = {} of UInt64 => Node(T)
-    @transport : Transport
     @config : Config
 
-    def initialize(@transport : Transport, @config : Config)
+    def initialize(@config : Config)
     end
 
     def add_group(group_id : UInt64, node_id : NodeID, peers : Array(NodeID), state_machine : StateMachine(T))
@@ -15,7 +14,7 @@ module Raft
       group_config.heartbeat_ticks = @config.heartbeat_ticks
       group_config.max_segment_size = @config.max_segment_size
       Dir.mkdir_p(group_config.data_dir)
-      @nodes[group_id] = Node(T).new(id: node_id, peers: peers, config: group_config, state_machine: state_machine)
+      @nodes[group_id] = Node(T).new(id: node_id, peers: peers, config: group_config, state_machine: state_machine, group_id: group_id)
     end
 
     def node(group_id : UInt64) : Node(T)
@@ -26,20 +25,10 @@ module Raft
       @nodes.each_value(&.tick)
     end
 
-    def process_messages(for_node : NodeID)
-      messages = @transport.receive(for_node: for_node)
-      messages.each do |msg|
-        if node = @nodes[msg.group_id]?
-          node.step(msg)
-        end
-      end
-    end
-
     def take_all_messages : Array({NodeID, Message})
       all = [] of {NodeID, Message}
-      @nodes.each do |group_id, node|
+      @nodes.each_value do |node|
         node.take_messages.each do |target_id, msg|
-          msg.group_id = group_id
           all << {target_id, msg}
         end
       end

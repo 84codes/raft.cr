@@ -1,18 +1,17 @@
 module Raft
   class MemoryTransport < Transport
-    @mailboxes = Hash(NodeID, Array(Message)).new { |h, k| h[k] = [] of Message }
+    @channels = Hash({UInt64, NodeID}, Channel(Message)).new
     @isolated = Set(NodeID).new
+
+    def register_channel(group_id : UInt64, node_id : NodeID, channel : Channel(Message))
+      @channels[{group_id, node_id}] = channel
+    end
 
     def send(to : NodeID, message : Message)
       return if @isolated.includes?(to) || @isolated.includes?(message.from)
-      @mailboxes[to] << message
-    end
-
-    def receive(for_node : NodeID) : Array(Message)
-      messages = @mailboxes[for_node]
-      result = messages.dup
-      messages.clear
-      result
+      if ch = @channels[{message.group_id, to}]?
+        ch.send(message)
+      end
     end
 
     def isolate(node : NodeID)

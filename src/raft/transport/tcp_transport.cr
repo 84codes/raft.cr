@@ -2,22 +2,28 @@ require "socket"
 
 module Raft
   class TCPTransport < Transport
-    @node_id : NodeID
     @listen_address : String
     @listen_port : Int32
     @peers : Hash(NodeID, {String, Int32}) = {} of NodeID => {String, Int32}
     @connections : Hash(NodeID, TCPSocket) = {} of NodeID => TCPSocket
-    @inbox : Array(Message) = [] of Message
-    @inbox_mutex : Mutex = Mutex.new
+    @channels : Hash(UInt64, Channel(Message)) = {} of UInt64 => Channel(Message)
     @server : TCPServer? = nil
     @running : Bool = false
-    getter notify : Channel(Nil) = Channel(Nil).new(1)
+    getter outbox : Channel({NodeID, Message}) = Channel({NodeID, Message}).new(256)
 
-    def initialize(@node_id : NodeID, @listen_address : String, @listen_port : Int32)
+    def initialize(@listen_address : String, @listen_port : Int32)
     end
 
     def register_peer(id : NodeID, host : String, port : Int32)
       @peers[id] = {host, port}
+    end
+
+    def register_channel(group_id : UInt64, channel : Channel(Message))
+      @channels[group_id] = channel
+    end
+
+    def unregister_channel(group_id : UInt64)
+      @channels.delete(group_id)
     end
 
     def start
@@ -31,6 +37,12 @@ module Raft
               handle_connection(client)
             end
           end
+        end
+      end
+      spawn(name: "raft-transport-write") do
+        while @running
+          target_id, msg = @outbox.receive
+          send(to: target_id, message: msg)
         end
       end
     end
@@ -56,14 +68,6 @@ module Raft
       end
     end
 
-    def receive(for_node : NodeID) : Array(Message)
-      @inbox_mutex.synchronize do
-        result = @inbox.dup
-        @inbox.clear
-        result
-      end
-    end
-
     private def get_connection(to : NodeID) : TCPSocket?
       if conn = @connections[to]?
         return conn unless conn.closed?
@@ -84,13 +88,8 @@ module Raft
       client.tcp_nodelay = true
       while @running
         msg = Message.from_io(client)
-        @inbox_mutex.synchronize do
-          @inbox << msg
-        end
-        select
-        when @notify.send(nil)
-        else
-          # Already notified, don't block
+        if ch = @channels[msg.group_id]?
+          ch.send(msg)
         end
       end
     rescue IO::EOFError | IO::Error
