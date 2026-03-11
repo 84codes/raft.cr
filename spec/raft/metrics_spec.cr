@@ -20,7 +20,7 @@ describe Raft::Metrics do
     m.observe("raft_append_latency_seconds", 0.0005)
     m.observe("raft_append_latency_seconds", 0.05)
     output = m.to_prometheus
-    output.should contain("raft_append_latency_seconds_count{node_id=\"1\"} 3")
+    output.should contain("raft_append_latency_seconds_count{node_id=\"1\",group_id=\"0\"} 3")
   end
 
   it "outputs prometheus text format" do
@@ -28,8 +28,8 @@ describe Raft::Metrics do
     m.set_gauge("raft_node_term", 5_i64)
     m.increment("raft_elections_total")
     output = m.to_prometheus
-    output.should contain("raft_node_term{node_id=\"1\"} 5")
-    output.should contain("raft_elections_total{node_id=\"1\"} 1")
+    output.should contain("raft_node_term{node_id=\"1\",group_id=\"0\"} 5")
+    output.should contain("raft_elections_total{node_id=\"1\",group_id=\"0\"} 1")
   end
 
   it "supports labeled histograms" do

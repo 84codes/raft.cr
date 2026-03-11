@@ -32,6 +32,8 @@ class KVHttpHandler
       handle_list_all(context)
     when {"POST", "/kv/rebalance"}
       handle_rebalance(context)
+    when {"GET", "/kv/metrics"}
+      handle_all_metrics(context)
     else
       if path.starts_with?("/kv/")
         key = path[4..]
@@ -206,6 +208,47 @@ class KVHttpHandler
     </body>
     </html>
     HTML
+  end
+
+  private def update_node_gauges(node : Raft::Node(KVCommand))
+    if metrics = node.metrics
+      metrics.set_gauge("raft_node_role", node.role.value.to_i64)
+      metrics.set_gauge("raft_node_term", node.current_term.to_i64)
+      metrics.set_gauge("raft_node_commit_index", node.commit_index.to_i64)
+      metrics.set_gauge("raft_node_last_log_index", node.log.last_index.to_i64)
+      metrics.set_gauge("raft_node_is_leader", node.role == Raft::Role::Leader ? 1_i64 : 0_i64)
+      metrics.set_gauge("raft_node_leader_id", (node.leader_id || 0_u64).to_i64)
+    end
+  end
+
+  private def handle_all_metrics(context)
+    context.response.content_type = "text/plain; version=0.0.4"
+    context.response.status_code = 200
+
+    node_id = @meta_node.id
+
+    # All groups (meta group 0 is included in @nodes)
+    @nodes.each_value do |node|
+      update_node_gauges(node)
+      if m = node.metrics
+        m.to_prometheus(context.response)
+      end
+    end
+
+    # Active groups from meta state — lets Grafana filter out stale Prometheus data
+    @meta_sm.all_groups.each do |key, group_id|
+      context.response << "raft_kv_group_active{node_id=\"" << node_id << "\",group_id=\"" << group_id << "\",key=\"" << key << "\"} 1\n"
+    end
+    # Meta group is always active
+    context.response << "raft_kv_group_active{node_id=\"" << node_id << "\",group_id=\"0\",key=\"meta\"} 1\n"
+
+    # Group info with leader and follower node IDs as labels
+    @nodes.each do |gid, node|
+      all_ids = ([node.id] + node.peers).sort
+      leader = node.leader_id || 0_u64
+      followers = all_ids.reject { |id| id == leader }.join(",")
+      context.response << "raft_kv_group_info{node_id=\"" << node_id << "\",group_id=\"" << gid << "\",leader=\"" << leader << "\",followers=\"" << followers << "\"} 1\n"
+    end
   end
 
   private def handle_rebalance(context)

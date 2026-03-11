@@ -102,6 +102,7 @@ module Raft
       # PreVote messages don't cause term changes — they're speculative
       unless message.type == MessageType::PreVote || message.type == MessageType::PreVoteResponse
         if message.term > @current_term
+          @metrics.try(&.increment("raft_term_changes_total", {"reason" => "higher_term"}))
           @current_term = message.term
           become_follower(message.from)
           persist_state
@@ -129,6 +130,7 @@ module Raft
     def propose(data : T) : Bool
       return false unless @role == Role::Leader
       @log.append(term: @current_term, data: data, entry_type: EntryType::Normal)
+      @metrics.try(&.increment("raft_proposals_total"))
       send_append_entries
       true
     end
@@ -138,6 +140,7 @@ module Raft
       return false unless @peers.includes?(target)
       return false if target == @id
       @transfer_target = target
+      @metrics.try(&.increment("raft_leadership_transfers_total", {"result" => "initiated"}))
       send_append_entries # ensure target is caught up
       maybe_send_timeout_now(target)
       true
@@ -168,6 +171,7 @@ module Raft
       @election_timeout = random_election_timeout
       @pre_votes_received = Set(NodeID).new
       @pre_votes_received.add(@id) # vote for self
+      @metrics.try(&.increment("raft_prevote_campaigns_total"))
 
       @peers.each do |peer|
         @outbox << {peer, Message.new(
@@ -181,6 +185,7 @@ module Raft
     end
 
     private def become_candidate
+      old_role = @role
       @role = Role::Candidate
       @current_term += 1
       @voted_for = @id
@@ -190,6 +195,8 @@ module Raft
       @votes_received.add(@id)
       persist_state
       @metrics.try(&.increment("raft_elections_total"))
+      @metrics.try(&.increment("raft_term_changes_total", {"reason" => "election"}))
+      @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "candidate"}))
 
       @peers.each do |peer|
         @outbox << {peer, Message.new(
@@ -203,6 +210,7 @@ module Raft
     end
 
     private def become_follower(leader : NodeID? = nil)
+      old_role = @role
       @role = Role::Follower
       @leader_id = leader
       @voted_for = nil
@@ -210,9 +218,11 @@ module Raft
       @election_timeout = random_election_timeout
       @transfer_target = nil
       persist_state
+      @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "follower"}))
     end
 
     private def become_leader
+      @metrics.try(&.increment("raft_state_transitions_total", {"from" => "candidate", "to" => "leader"}))
       @role = Role::Leader
       @leader_id = @id
       @heartbeat_tick = 0_u32
@@ -231,6 +241,7 @@ module Raft
       @election_tick = 0_u32
 
       if msg.term < @current_term
+        @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "stale_term"}))
         @outbox << {msg.from, Message.new(
           type: MessageType::AppendEntriesResponse,
           from: @id,
@@ -251,6 +262,7 @@ module Raft
       # Check prev_log consistency
       if msg.prev_log_index > 0
         if msg.prev_log_index > @log.last_index
+          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "log_gap"}))
           @outbox << {msg.from, Message.new(
             type: MessageType::AppendEntriesResponse,
             from: @id,
@@ -261,6 +273,7 @@ module Raft
           return
         end
         if @log.term_at(msg.prev_log_index) != msg.prev_log_term
+          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
           @outbox << {msg.from, Message.new(
             type: MessageType::AppendEntriesResponse,
             from: @id,
@@ -279,6 +292,7 @@ module Raft
           entry = LogEntry(T).from_io(io)
           if entry.index <= @log.last_index
             if @log.term_at(entry.index) != entry.term
+              @metrics.try(&.increment("raft_log_truncations_total"))
               @log.truncate_after(entry.index - 1)
               @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
             end
@@ -286,6 +300,7 @@ module Raft
             @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
           end
         end
+        @metrics.try(&.increment("raft_log_entries_received_total", by: msg.entries_count.to_i64))
       end
 
       # Update commit index and apply
@@ -293,6 +308,7 @@ module Raft
         new_commit = Math.min(msg.commit_index, @log.last_index)
         apply_entries(@commit_index + 1, new_commit)
         @commit_index = new_commit
+        @metrics.try(&.increment("raft_commit_advances_total"))
       end
 
       @outbox << {msg.from, Message.new(
@@ -320,6 +336,7 @@ module Raft
           maybe_send_timeout_now(target) if msg.from == target
         end
       else
+        @metrics.try(&.increment("raft_replication_rejections_total"))
         hint = msg.reject_hint
         @next_index[msg.from] = Math.max(hint + 1, 1_u64)
       end
@@ -336,6 +353,7 @@ module Raft
         if replication_count >= quorum
           apply_entries(@commit_index + 1, n)
           @commit_index = n
+          @metrics.try(&.increment("raft_commit_advances_total"))
           break
         end
       end
@@ -364,6 +382,12 @@ module Raft
             persist_state
           end
         end
+      end
+
+      if vote_granted
+        @metrics.try(&.increment("raft_votes_granted_total"))
+      else
+        @metrics.try(&.increment("raft_votes_denied_total"))
       end
 
       @outbox << {msg.from, Message.new(
@@ -410,6 +434,7 @@ module Raft
         )}
         @metrics.try(&.increment("raft_messages_sent_total"))
         @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
+        @metrics.try(&.increment("raft_log_entries_sent_total", by: entries_count.to_i64)) if entries_count > 0
       end
     end
 
@@ -424,6 +449,12 @@ module Raft
            (msg.last_log_term == @log.last_term && msg.last_log_index >= @log.last_index)
           vote_granted = true
         end
+      end
+
+      if vote_granted
+        @metrics.try(&.increment("raft_prevotes_granted_total"))
+      else
+        @metrics.try(&.increment("raft_prevotes_denied_total"))
       end
 
       @outbox << {msg.from, Message.new(
@@ -447,6 +478,7 @@ module Raft
     private def handle_timeout_now(msg : Message)
       return unless @role == Role::Follower
       return unless msg.term == @current_term
+      @metrics.try(&.increment("raft_timeout_now_received_total"))
       # Skip pre-vote, go straight to candidate
       become_candidate
     end
@@ -455,6 +487,7 @@ module Raft
       match = @match_index.fetch(target, 0_u64)
       return unless match >= @log.last_index
       @transfer_target = nil
+      @metrics.try(&.increment("raft_leadership_transfers_total", {"result" => "completed"}))
       @outbox << {target, Message.new(
         type: MessageType::TimeoutNow,
         from: @id,

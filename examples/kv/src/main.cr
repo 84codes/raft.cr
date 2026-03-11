@@ -71,9 +71,10 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(KVCommand)) {
   cfg.election_timeout_max_ticks = 20_u32
   cfg.heartbeat_ticks = 2_u32
   Dir.mkdir_p(cfg.data_dir)
+  metrics = Raft::Metrics.new(node_id: node_id, group_id: group_id)
   node = Raft::Node(KVCommand).new(
     id: node_id, peers: peer_ids, config: cfg,
-    state_machine: sm, group_id: group_id
+    state_machine: sm, metrics: metrics, group_id: group_id
   )
   nodes[group_id] = node
   transport.register_channel(group_id, node.inbox)
