@@ -58,6 +58,8 @@ start_group_loop = ->(node : Raft::Node(KVCommand)) {
         transport.outbox.send({target_id, msg})
       end
     end
+  rescue Channel::ClosedError
+    Log.info { "Raft group #{node.group_id} stopped" }
   end
 }
 

@@ -209,12 +209,20 @@ class KVHttpHandler
   end
 
   private def handle_rebalance(context)
-    all_peer_ids = [@meta_node.id] + @meta_node.peers
-    groups = @meta_sm.all_groups
+    all_peer_ids = ([@meta_node.id] + @meta_node.peers).sort
+    groups = @meta_sm.all_groups.to_a
     transfers = [] of {String, UInt64, UInt64}
 
+    # Compute desired assignment: round-robin groups across sorted node IDs
+    desired = {} of UInt64 => UInt64 # group_id => target_node_id
     groups.each_with_index do |(key, group_id), idx|
-      target_id = all_peer_ids[idx % all_peer_ids.size]
+      desired[group_id] = all_peer_ids[idx % all_peer_ids.size]
+    end
+
+    # Only transfer groups where THIS node is currently the leader
+    # (we can only initiate transfer from the leader)
+    groups.each do |key, group_id|
+      target_id = desired[group_id]
       if node = @nodes[group_id]?
         if node.role == Raft::Role::Leader && node.id != target_id
           node.transfer_leadership(to: target_id)
@@ -228,6 +236,7 @@ class KVHttpHandler
     result = {
       "status"    => "rebalance_initiated",
       "transfers" => transfers.size,
+      "total_groups" => groups.size,
       "details"   => transfers.map { |key, from, to| {"key" => key, "from" => from, "to" => to} },
     }
     context.response.print result.to_json

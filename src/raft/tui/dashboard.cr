@@ -222,26 +222,23 @@ module Raft
       end
 
       private def rebalance
-        if leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+        total_transfers = 0
+        @nodes.each do |node|
+          next unless node.reachable
           begin
-            uri = URI.parse(leader.address)
+            uri = URI.parse(node.address)
             client = ::HTTP::Client.new(uri)
             client.connect_timeout = 2.seconds
             client.read_timeout = 2.seconds
             response = client.post("/kv/rebalance")
             if response.status_code == 200
               data = JSON.parse(response.body)
-              transfers = data["transfers"].as_i
-              add_event("Rebalance: #{transfers} transfer(s) initiated")
-            else
-              add_event("Rebalance failed: HTTP #{response.status_code}")
+              total_transfers += data["transfers"].as_i
             end
-          rescue ex
-            add_event("Rebalance failed: #{ex.message}")
+          rescue
           end
-        else
-          add_event("No reachable leader for rebalance")
         end
+        add_event("Rebalance: #{total_transfers} transfer(s) initiated across #{@nodes.count(&.reachable)} nodes")
       end
 
       private def post_admin(address : String, action : String)

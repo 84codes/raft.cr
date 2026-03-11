@@ -159,6 +159,7 @@ module Raft
     end
 
     def close
+      @inbox.close
       @log.close
     end
 
@@ -240,7 +241,12 @@ module Raft
         return
       end
 
-      @leader_id = msg.from
+      # Candidate receiving AppendEntries from leader in same term: step down
+      if @role == Role::Candidate
+        become_follower(msg.from)
+      else
+        @leader_id = msg.from
+      end
 
       # Check prev_log consistency
       if msg.prev_log_index > 0
