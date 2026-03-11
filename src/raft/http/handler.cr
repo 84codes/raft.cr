@@ -12,29 +12,23 @@ module Raft
       end
 
       def call(context : ::HTTP::Server::Context)
-        case {context.request.method, context.request.path}
+        method = context.request.method
+        path = context.request.path
+
+        case {method, path}
         when {"GET", "/raft/status"}
           handle_status(context)
         when {"GET", "/raft/log"}
           handle_log(context)
         when {"GET", "/raft/metrics"}
           handle_metrics(context)
-        when {"POST", "/raft/admin/pause"}
-          @node.pause
-          json_response(context, 200, {"status" => "paused"})
-        when {"POST", "/raft/admin/resume"}
-          @node.resume
-          json_response(context, 200, {"status" => "resumed"})
-        when {"POST", "/raft/admin/partition"}
-          @node.partition
-          json_response(context, 200, {"status" => "partitioned"})
-        when {"POST", "/raft/admin/heal"}
-          @node.heal
-          json_response(context, 200, {"status" => "healed"})
-        when {"POST", "/raft/admin/reset"}
-          @node.reset
-          json_response(context, 200, {"status" => "reset"})
         else
+          {% if flag?(:raft_debug) %}
+            if method == "POST" && path.starts_with?("/raft/admin/")
+              handle_admin(context, path)
+              return
+            end
+          {% end %}
           call_next(context)
         end
       end
@@ -54,7 +48,9 @@ module Raft
                 @node.peers.each { |p| j.number(p) }
               end
             end
-            j.field "paused", @node.paused
+            {% if flag?(:raft_debug) %}
+              j.field "paused", @node.paused
+            {% end %}
           end
         end
         context.response.content_type = "application/json"
@@ -93,6 +89,31 @@ module Raft
           context.response.print "Metrics not configured"
         end
       end
+
+      {% if flag?(:raft_debug) %}
+        private def handle_admin(context, path)
+          case path
+          when "/raft/admin/pause"
+            @node.pause
+            json_response(context, 200, {"status" => "paused"})
+          when "/raft/admin/resume"
+            @node.resume
+            json_response(context, 200, {"status" => "resumed"})
+          when "/raft/admin/partition"
+            @node.partition
+            json_response(context, 200, {"status" => "partitioned"})
+          when "/raft/admin/heal"
+            @node.heal
+            json_response(context, 200, {"status" => "healed"})
+          when "/raft/admin/reset"
+            @node.reset
+            json_response(context, 200, {"status" => "reset"})
+          else
+            context.response.status_code = 404
+            context.response.print "Unknown admin action"
+          end
+        end
+      {% end %}
 
       private def json_response(context, status : Int32, data : Hash)
         context.response.content_type = "application/json"

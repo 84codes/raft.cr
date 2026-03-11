@@ -277,73 +277,75 @@ describe Raft::Node do
     end
   end
 
-  describe "pause and resume" do
-    it "does not tick when paused" do
-      config = Raft::Config.new
-      config.election_timeout_min_ticks = 3_u32
-      config.election_timeout_max_ticks = 3_u32
+  {% if flag?(:raft_debug) %}
+    describe "pause and resume" do
+      it "does not tick when paused" do
+        config = Raft::Config.new
+        config.election_timeout_min_ticks = 3_u32
+        config.election_timeout_max_ticks = 3_u32
 
-      node = create_test_node(1_u64, [2_u64, 3_u64], config)
-      node.pause
-      10.times { node.tick }
-      node.role.should eq Raft::Role::Follower # should not have become candidate
+        node = create_test_node(1_u64, [2_u64, 3_u64], config)
+        node.pause
+        10.times { node.tick }
+        node.role.should eq Raft::Role::Follower # should not have become candidate
 
-      node.resume
-      3.times { node.tick }
-      # With pre-vote, timeout sends PreVote but stays Follower
-      messages = node.take_messages
-      messages.size.should eq 2
-      messages.all? { |_, m| m.type == Raft::MessageType::PreVote }.should be_true
+        node.resume
+        3.times { node.tick }
+        # With pre-vote, timeout sends PreVote but stays Follower
+        messages = node.take_messages
+        messages.size.should eq 2
+        messages.all? { |_, m| m.type == Raft::MessageType::PreVote }.should be_true
 
-      node.close
+        node.close
+      end
     end
-  end
 
-  describe "partition" do
-    it "drops messages when partitioned" do
-      config = Raft::Config.new
-      config.election_timeout_min_ticks = 100_u32
-      config.election_timeout_max_ticks = 100_u32
+    describe "partition" do
+      it "drops messages when partitioned" do
+        config = Raft::Config.new
+        config.election_timeout_min_ticks = 100_u32
+        config.election_timeout_max_ticks = 100_u32
 
-      node = create_test_node(1_u64, [2_u64, 3_u64], config)
-      node.partition
+        node = create_test_node(1_u64, [2_u64, 3_u64], config)
+        node.partition
 
-      heartbeat = Raft::Message.new(
-        type: Raft::MessageType::AppendEntries,
-        from: 2_u64,
-        term: 1_u64,
-      )
-      node.step(heartbeat)
-      node.take_messages.size.should eq 0 # no response generated
+        heartbeat = Raft::Message.new(
+          type: Raft::MessageType::AppendEntries,
+          from: 2_u64,
+          term: 1_u64,
+        )
+        node.step(heartbeat)
+        node.take_messages.size.should eq 0 # no response generated
 
-      node.heal
-      node.step(heartbeat)
-      node.take_messages.size.should be > 0 # responds now
+        node.heal
+        node.step(heartbeat)
+        node.take_messages.size.should be > 0 # responds now
 
-      node.close
+        node.close
+      end
     end
-  end
 
-  describe "pre-vote" do
-    it "prevents term inflation during partition" do
-      config = Raft::Config.new
-      config.election_timeout_min_ticks = 3_u32
-      config.election_timeout_max_ticks = 3_u32
+    describe "pre-vote" do
+      it "prevents term inflation during partition" do
+        config = Raft::Config.new
+        config.election_timeout_min_ticks = 3_u32
+        config.election_timeout_max_ticks = 3_u32
 
-      node = create_test_node(1_u64, [2_u64, 3_u64], config)
-      node.partition
+        node = create_test_node(1_u64, [2_u64, 3_u64], config)
+        node.partition
 
-      # Tick many election timeouts — node sends PreVotes but they're dropped
-      30.times { node.tick }
-      node.take_messages # clear (all dropped by partition anyway)
+        # Tick many election timeouts — node sends PreVotes but they're dropped
+        30.times { node.tick }
+        node.take_messages # clear (all dropped by partition anyway)
 
-      # Term should NOT have inflated — still 0
-      node.current_term.should eq 0_u64
-      node.role.should eq Raft::Role::Follower
+        # Term should NOT have inflated — still 0
+        node.current_term.should eq 0_u64
+        node.role.should eq Raft::Role::Follower
 
-      node.close
+        node.close
+      end
     end
-  end
+  {% end %}
 
   describe "peers" do
     it "exposes peer list" do

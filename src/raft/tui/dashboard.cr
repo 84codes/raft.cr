@@ -67,7 +67,7 @@ module Raft
               node.leader_id = data["leader_id"].as_i64?.try(&.to_u64)
               node.commit_index = data["commit_index"].as_i64.to_u64
               node.last_log_index = data["last_log_index"].as_i64.to_u64
-              node.paused = data["paused"].as_bool
+              node.paused = data["paused"]?.try(&.as_bool) || false
               node.reachable = true
 
               if old_role != "unknown" && old_role != node.role
@@ -122,7 +122,7 @@ module Raft
           line(io, "")
           line(io, "\e[1m\e[36m── Controls ──────────────────────────────────────────\e[0m")
           line(io, "  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal")
-          line(io, "  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all  \e[1m[d]\e[0m Reset  \e[1m[q]\e[0m Quit")
+          line(io, "  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all  \e[1m[d]\e[0m Reset  \e[1m[b]\e[0m Rebalance  \e[1m[q]\e[0m Quit")
         end
         STDOUT.write(buf.to_slice)
       end
@@ -153,6 +153,8 @@ module Raft
           prompt_node("Heal") { |id| heal_node(id) }
         when 'd'
           prompt_node("Reset") { |id| reset_node(id) }
+        when 'b'
+          rebalance
         end
       end
 
@@ -216,6 +218,29 @@ module Raft
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "reset")
           add_event("Reset Node #{id}")
+        end
+      end
+
+      private def rebalance
+        if leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+          begin
+            uri = URI.parse(leader.address)
+            client = ::HTTP::Client.new(uri)
+            client.connect_timeout = 2.seconds
+            client.read_timeout = 2.seconds
+            response = client.post("/kv/rebalance")
+            if response.status_code == 200
+              data = JSON.parse(response.body)
+              transfers = data["transfers"].as_i
+              add_event("Rebalance: #{transfers} transfer(s) initiated")
+            else
+              add_event("Rebalance failed: HTTP #{response.status_code}")
+            end
+          rescue ex
+            add_event("Rebalance failed: #{ex.message}")
+          end
+        else
+          add_event("No reachable leader for rebalance")
         end
       end
 

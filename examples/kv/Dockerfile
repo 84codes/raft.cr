@@ -2,7 +2,7 @@
 FROM 84codes/crystal:1.19.0-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN crystal build examples/kv/src/main.cr -o kv_node -Dpreview_mt -Dexecution_context --release --static
+RUN crystal build examples/kv/src/main.cr -o kv_node -Dpreview_mt -Dexecution_context -Draft_debug --release --static
 
 FROM alpine:3.19
 COPY --from=builder /app/kv_node /usr/local/bin/kv_node

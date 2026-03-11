@@ -56,6 +56,7 @@ describe Raft::HTTP::Handler do
     FileUtils.rm_rf(dir)
   end
 
+  {% if flag?(:raft_debug) %}
   it "pauses and resumes node via admin endpoints" do
     dir = File.tempname("raft_http")
     Dir.mkdir_p(dir)
@@ -84,4 +85,5 @@ describe Raft::HTTP::Handler do
     node.close
     FileUtils.rm_rf(dir)
   end
+  {% end %}
 end

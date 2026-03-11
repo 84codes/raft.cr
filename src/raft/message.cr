@@ -14,6 +14,7 @@ module Raft
     InstallSnapshotResponse = 5
     PreVote                 = 6
     PreVoteResponse         = 7
+    TimeoutNow              = 8
   end
 
   enum Role

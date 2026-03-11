@@ -101,6 +101,7 @@ describe "Integration: 3-node Raft cluster" do
     nodes.each_value(&.close)
   end
 
+  {% if flag?(:raft_debug) %}
   it "partitioned node does not inflate term (pre-vote)" do
     nodes, sms = make_cluster
 
@@ -181,6 +182,92 @@ describe "Integration: 3-node Raft cluster" do
     # Node 1's uncommitted entries should be overwritten
     sms[1_u64].applied.size.should eq 2
     sms[1_u64].applied[1].value.should eq "new_leader_entry"
+
+    nodes.each_value(&.close)
+  end
+
+  it "paused leader triggers new election" do
+    nodes, sms = make_cluster
+
+    # Elect node 1
+    5.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    nodes[1_u64].role.should eq Raft::Role::Leader
+
+    # Commit an entry so we know cluster is working
+    nodes[1_u64].propose(TestData.new("before_pause"))
+    deliver_all(nodes)
+    2.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    sms.each_value { |sm| sm.applied.size.should eq 1 }
+
+    # Pause the leader — it stops ticking (no heartbeats)
+    nodes[1_u64].pause
+
+    # Tick followers past election timeout — they should start an election
+    # Only tick node 2 first to avoid split vote
+    5.times { nodes[2_u64].tick }
+    deliver_all(nodes)
+
+    # Node 2 should be the new leader
+    nodes[2_u64].role.should eq Raft::Role::Leader
+    nodes[2_u64].current_term.should be > 1_u64
+
+    # New leader can accept proposals
+    nodes[2_u64].propose(TestData.new("after_pause"))
+    deliver_all(nodes)
+    2.times { nodes[2_u64].tick }
+    deliver_all(nodes)
+
+    # Node 3 should have the new entry (node 1 is paused, won't get it)
+    sms[3_u64].applied.size.should eq 2
+    sms[3_u64].applied[1].value.should eq "after_pause"
+
+    # Resume node 1 — it should step down and catch up
+    nodes[1_u64].resume
+    2.times { nodes[2_u64].tick } # heartbeat from new leader
+    deliver_all(nodes)
+
+    nodes[1_u64].role.should eq Raft::Role::Follower
+    sms[1_u64].applied.size.should eq 2
+    sms[1_u64].applied[1].value.should eq "after_pause"
+
+    nodes.each_value(&.close)
+  end
+  {% end %}
+
+  it "transfers leadership to a specific follower" do
+    nodes, sms = make_cluster
+
+    # Elect node 1
+    5.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    nodes[1_u64].role.should eq Raft::Role::Leader
+
+    # Commit an entry so logs are synced
+    nodes[1_u64].propose(TestData.new("before_transfer"))
+    deliver_all(nodes)
+    2.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+
+    # Transfer leadership to node 3
+    nodes[1_u64].transfer_leadership(to: 3_u64).should be_true
+    deliver_all(nodes)
+
+    # Node 3 should now be leader with a higher term
+    nodes[3_u64].role.should eq Raft::Role::Leader
+    nodes[3_u64].current_term.should eq 2_u64
+
+    # Node 1 should have stepped down
+    nodes[1_u64].role.should eq Raft::Role::Follower
+
+    # New leader can accept proposals
+    nodes[3_u64].propose(TestData.new("after_transfer"))
+    deliver_all(nodes)
+    2.times { nodes[3_u64].tick }
+    deliver_all(nodes)
+
+    sms.each_value { |sm| sm.applied.size.should eq 2 }
 
     nodes.each_value(&.close)
   end

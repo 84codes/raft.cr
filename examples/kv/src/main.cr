@@ -2,6 +2,8 @@
 require "../../../src/raft"
 require "./kv_command"
 require "./kv_state_machine"
+require "./meta_state_machine"
+require "./value_state_machine"
 require "./kv_http_handler"
 require "http/server"
 require "log"
@@ -13,9 +15,9 @@ node_id = (ENV["NODE_ID"]? || "1").to_u64
 http_port = (ENV["HTTP_PORT"]? || "8001").to_i
 raft_port = (ENV["RAFT_PORT"]? || "9000").to_i
 peers_str = ENV["PEERS"]? || ""
+base_data_dir = ENV["DATA_DIR"]? || "/data/raft"
 
 # Parse peers: "node-2:9000,node-3:9000" -> [{id, host, port}]
-# Extract peer ID from hostname pattern node-(\d+)
 peer_configs = [] of {UInt64, String, Int32}
 peers_str.split(",").each do |peer|
   next if peer.strip.empty?
@@ -32,30 +34,78 @@ end
 
 peer_ids = peer_configs.map(&.[0])
 
-# Raft config
-config = Raft::Config.new
-config.data_dir = ENV["DATA_DIR"]? || "/data/raft"
-config.election_timeout_min_ticks = 10_u32
-config.election_timeout_max_ticks = 20_u32
-config.heartbeat_ticks = 2_u32
-
-# Create state machine and node
-state_machine = KVStateMachine.new
-metrics = Raft::Metrics.new(node_id: node_id)
-node = Raft::Node(KVCommand).new(id: node_id, peers: peer_ids, config: config, state_machine: state_machine, metrics: metrics)
-
 # Setup TCP transport
-transport = Raft::TCPTransport.new(node_id: node_id, listen_address: "0.0.0.0", listen_port: raft_port)
+transport = Raft::TCPTransport.new(listen_address: "0.0.0.0", listen_port: raft_port)
 peer_configs.each do |pc|
   transport.register_peer(pc[0], pc[1], pc[2])
 end
+
+# Shared state
+nodes = Hash(UInt64, Raft::Node(KVCommand)).new
+value_machines = Hash(UInt64, ValueStateMachine).new
+
+# Start a group's event loop
+start_group_loop = ->(node : Raft::Node(KVCommand)) {
+  spawn(name: "raft-group-#{node.group_id}") do
+    loop do
+      select
+      when msg = node.inbox.receive
+        node.step(msg)
+      when timeout(50.milliseconds)
+        node.tick
+      end
+      node.take_messages.each do |target_id, msg|
+        transport.outbox.send({target_id, msg})
+      end
+    end
+  end
+}
+
+# Helper to create a node for a group
+create_node = ->(group_id : UInt64, sm : Raft::StateMachine(KVCommand)) {
+  cfg = Raft::Config.new
+  cfg.data_dir = File.join(base_data_dir, "group-#{group_id}")
+  cfg.election_timeout_min_ticks = 10_u32
+  cfg.election_timeout_max_ticks = 20_u32
+  cfg.heartbeat_ticks = 2_u32
+  Dir.mkdir_p(cfg.data_dir)
+  node = Raft::Node(KVCommand).new(
+    id: node_id, peers: peer_ids, config: cfg,
+    state_machine: sm, group_id: group_id
+  )
+  nodes[group_id] = node
+  transport.register_channel(group_id, node.inbox)
+  start_group_loop.call(node)
+  Log.info { "Created Raft group #{group_id}" }
+  node
+}
+
+on_delete_group = ->(key : String, gid : UInt64) {
+  if node = nodes.delete(gid)
+    node.close
+    transport.unregister_channel(gid)
+  end
+  value_machines.delete(gid)
+  Log.info { "Deleted data group #{gid} for key '#{key}'" }
+}
+
+# Meta group (group 0) — manages key → group_id mapping
+meta_sm = MetaStateMachine.new(on_delete_group) do |key, gid, initial_value|
+  vsm = ValueStateMachine.new(initial_value)
+  create_node.call(gid, vsm)
+  value_machines[gid] = vsm
+  Log.info { "Created data group #{gid} for key '#{key}' (initial: #{initial_value || "nil"})" }
+end
+
+meta_node = create_node.call(0_u64, meta_sm)
+
 transport.start
 
 # HTTP server
-raft_handler = Raft::HTTP::Handler(KVCommand).new(node)
-kv_handler = KVHttpHandler.new(node, state_machine)
+raft_handler = Raft::HTTP::Handler(KVCommand).new(meta_node)
+kv_handler = KVHttpHandler.new(meta_node, meta_sm, nodes, value_machines)
 
-server = ::HTTP::Server.new([raft_handler, kv_handler]) do |context|
+server = ::HTTP::Server.new([kv_handler, raft_handler]) do |context|
   context.response.status_code = 404
   context.response.print "Not found"
 end
@@ -65,65 +115,12 @@ shutdown = ->(_signal : Signal) do
   puts "\nShutting down node #{node_id}..."
   server.close
   transport.stop
-  node.close
+  nodes.each_value(&.close)
   exit 0
 end
 
 Signal::INT.trap(&shutdown)
 Signal::TERM.trap(&shutdown)
-
-# Tick loop
-last_role = node.role
-last_term = node.current_term
-last_leader = node.leader_id
-
-tick_ch = Channel(Nil).new(1)
-
-spawn(name: "raft-tick") do
-  last_tick = Time.instant
-  loop do
-    sleep 50.milliseconds
-    now = Time.instant
-    elapsed = now - last_tick
-    last_tick = now
-    # Skip tick if system was suspended (e.g. laptop sleep)
-    if elapsed > 1.second
-      Log.warn { "clock jump detected (#{elapsed.total_seconds.round(1)}s), skipping tick" }
-      next
-    end
-    select
-    when tick_ch.send(nil)
-    else
-    end
-  end
-end
-
-spawn(name: "raft-event-loop") do
-  loop do
-    # Wait for either a tick or incoming message notification
-    select
-    when tick_ch.receive
-      node.tick
-    when transport.notify.receive
-      transport.receive(for_node: node_id).each do |msg|
-        node.step(msg)
-      end
-    end
-
-    # Send outgoing messages immediately
-    node.take_messages.each do |target_id, msg|
-      transport.send(to: target_id, message: msg)
-    end
-
-    # Log state changes
-    if node.role != last_role || node.current_term != last_term || node.leader_id != last_leader
-      Log.info { "role=#{node.role} term=#{node.current_term} leader=#{node.leader_id}" }
-      last_role = node.role
-      last_term = node.current_term
-      last_leader = node.leader_id
-    end
-  end
-end
 
 puts "Node #{node_id} starting on HTTP :#{http_port}, Raft :#{raft_port}"
 server.bind_tcp("0.0.0.0", http_port)

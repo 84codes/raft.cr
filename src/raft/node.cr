@@ -9,12 +9,17 @@ module Raft
     getter log : Log(T)
 
     getter peers : Array(NodeID)
-    getter paused : Bool = false
-    getter partitioned : Bool = false
     getter metrics : Metrics?
+    {% if flag?(:raft_debug) %}
+      getter paused : Bool = false
+      getter partitioned : Bool = false
+    {% end %}
+    getter group_id : UInt64
+    getter inbox : Channel(Message) = Channel(Message).new(64)
     @config : Config
     @state_machine : StateMachine(T)
     @outbox : Array({NodeID, Message}) = [] of {NodeID, Message}
+    @transfer_target : NodeID? = nil
     @election_tick : UInt32 = 0_u32
     @heartbeat_tick : UInt32 = 0_u32
     @election_timeout : UInt32
@@ -24,50 +29,54 @@ module Raft
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
 
-    def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil)
+    def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64)
       @log = Log(T).new(@config)
       @election_timeout = random_election_timeout
       recover_state
     end
 
-    def pause
-      @paused = true
-    end
+    {% if flag?(:raft_debug) %}
+      def pause
+        @paused = true
+      end
 
-    def resume
-      @paused = false
-    end
+      def resume
+        @paused = false
+      end
 
-    def partition
-      @partitioned = true
-    end
+      def partition
+        @partitioned = true
+      end
 
-    def heal
-      @partitioned = false
-    end
+      def heal
+        @partitioned = false
+      end
 
-    def reset
-      @role = Role::Follower
-      @current_term = 0_u64
-      @voted_for = nil
-      @leader_id = nil
-      @commit_index = 0_u64
-      @election_tick = 0_u32
-      @heartbeat_tick = 0_u32
-      @election_timeout = random_election_timeout
-      @votes_received = Set(NodeID).new
-      @pre_votes_received = Set(NodeID).new
-      @next_index.clear
-      @match_index.clear
-      @outbox.clear
-      @paused = false
-      @partitioned = false
-      @log.reset
-      persist_state
-    end
+      def reset
+        @role = Role::Follower
+        @current_term = 0_u64
+        @voted_for = nil
+        @leader_id = nil
+        @commit_index = 0_u64
+        @election_tick = 0_u32
+        @heartbeat_tick = 0_u32
+        @election_timeout = random_election_timeout
+        @votes_received = Set(NodeID).new
+        @pre_votes_received = Set(NodeID).new
+        @next_index.clear
+        @match_index.clear
+        @outbox.clear
+        @paused = false
+        @partitioned = false
+        @log.reset
+        persist_state
+      end
+    {% end %}
 
     def tick
-      return if @paused
+      {% if flag?(:raft_debug) %}
+        return if @paused
+      {% end %}
       case @role
       when Role::Follower
         @election_tick += 1
@@ -85,8 +94,10 @@ module Raft
     end
 
     def step(message : Message)
-      return if @paused
-      return if @partitioned
+      {% if flag?(:raft_debug) %}
+        return if @paused
+        return if @partitioned
+      {% end %}
 
       # PreVote messages don't cause term changes — they're speculative
       unless message.type == MessageType::PreVote || message.type == MessageType::PreVoteResponse
@@ -110,6 +121,8 @@ module Raft
         handle_pre_vote(message)
       when MessageType::PreVoteResponse
         handle_pre_vote_response(message)
+      when MessageType::TimeoutNow
+        handle_timeout_now(message)
       end
     end
 
@@ -120,12 +133,27 @@ module Raft
       true
     end
 
+    def transfer_leadership(to target : NodeID) : Bool
+      return false unless @role == Role::Leader
+      return false unless @peers.includes?(target)
+      return false if target == @id
+      @transfer_target = target
+      send_append_entries # ensure target is caught up
+      maybe_send_timeout_now(target)
+      true
+    end
+
     def take_messages : Array({NodeID, Message})
-      if @partitioned
-        @outbox.clear
-        return [] of {NodeID, Message}
+      {% if flag?(:raft_debug) %}
+        if @partitioned
+          @outbox.clear
+          return [] of {NodeID, Message}
+        end
+      {% end %}
+      messages = @outbox.map do |target_id, msg|
+        msg.group_id = @group_id
+        {target_id, msg}
       end
-      messages = @outbox.dup
       @outbox.clear
       messages
     end
@@ -179,6 +207,7 @@ module Raft
       @voted_for = nil
       @election_tick = 0_u32
       @election_timeout = random_election_timeout
+      @transfer_target = nil
       persist_state
     end
 
@@ -281,6 +310,9 @@ module Raft
           @next_index[msg.from] = reported_index + 1
         end
         advance_commit_index
+        if target = @transfer_target
+          maybe_send_timeout_now(target) if msg.from == target
+        end
       else
         hint = msg.reject_hint
         @next_index[msg.from] = Math.max(hint + 1, 1_u64)
@@ -404,6 +436,24 @@ module Raft
         quorum = (@peers.size + 1) // 2 + 1
         become_candidate if @pre_votes_received.size >= quorum
       end
+    end
+
+    private def handle_timeout_now(msg : Message)
+      return unless @role == Role::Follower
+      return unless msg.term == @current_term
+      # Skip pre-vote, go straight to candidate
+      become_candidate
+    end
+
+    private def maybe_send_timeout_now(target : NodeID)
+      match = @match_index.fetch(target, 0_u64)
+      return unless match >= @log.last_index
+      @transfer_target = nil
+      @outbox << {target, Message.new(
+        type: MessageType::TimeoutNow,
+        from: @id,
+        term: @current_term,
+      )}
     end
 
     private def random_election_timeout : UInt32

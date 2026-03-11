@@ -1,6 +1,8 @@
 enum KVAction : UInt8
-  Put    = 0
-  Delete = 1
+  Put         = 0
+  Delete      = 1
+  CreateGroup = 2
+  DeleteGroup = 3
 end
 
 struct KVCommand
