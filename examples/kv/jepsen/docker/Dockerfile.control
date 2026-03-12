@@ -1,0 +1,35 @@
+FROM eclipse-temurin:21-jre-jammy
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    gnuplot graphviz curl wget openssh-client ca-certificates git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Leiningen
+RUN wget -q -O /usr/local/bin/lein \
+    https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein && \
+    chmod +x /usr/local/bin/lein
+
+# SSH config + key
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    printf "Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" \
+    > /root/.ssh/config
+COPY examples/kv/jepsen/docker/secret/id_rsa /root/.ssh/id_rsa
+RUN chmod 600 /root/.ssh/id_rsa
+
+WORKDIR /jepsen
+
+# Pre-download dependencies
+COPY examples/kv/jepsen/project.clj .
+RUN lein deps
+
+# Copy test source
+COPY examples/kv/jepsen/src src
+
+# Results stored in /jepsen/store (mount as volume)
+VOLUME /jepsen/store
+
+CMD ["lein", "run", "test", \
+     "--nodes", "n1,n2,n3,n4,n5", \
+     "--time-limit", "60", \
+     "--concurrency", "25"]

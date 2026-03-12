@@ -1,0 +1,30 @@
+# Stage 1: compile KV binary
+FROM 84codes/crystal:1.19.0-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN crystal build examples/kv/src/main.cr -o kv_node \
+    -Dpreview_mt -Dexecution_context -Draft_debug \
+    --release --static
+
+# Stage 2: Jepsen-compatible DB node
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openssh-server iptables iproute2 curl procps sudo && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir /run/sshd && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    echo 'root:root' | chpasswd
+
+# SSH authorized keys (from control node)
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+COPY examples/kv/jepsen/docker/secret/id_rsa.pub /root/.ssh/authorized_keys
+RUN chmod 600 /root/.ssh/authorized_keys
+
+COPY --from=builder /app/kv_node /usr/local/bin/kv_node
+RUN mkdir -p /data/raft
+
+EXPOSE 22 8080 9000
+CMD ["/usr/sbin/sshd", "-D", "-e"]

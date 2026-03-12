@@ -300,8 +300,18 @@ class KVHttpHandler
     context.response.print({error: "key not found"}.to_json)
   end
 
+  private def wait_for_commit(node : Raft::Node(KVCommand), timeout : Time::Span = 5.seconds) : Bool
+    target_index = node.log.last_index
+    deadline = Time.instant + timeout
+    while node.commit_index < target_index && Time.instant < deadline
+      sleep 10.milliseconds
+    end
+    node.commit_index >= target_index
+  end
+
   private def handle_put(context, key)
     value = context.request.body.try(&.gets_to_end) || ""
+    wait = context.request.query_params.has_key?("wait")
 
     if group_id = @meta_sm.group_for(key)
       # Group exists — propose value to data group
@@ -313,9 +323,13 @@ class KVHttpHandler
           return
         end
         node.propose(KVCommand.new(KVAction::Put, key, value))
-        context.response.status_code = 202
         context.response.content_type = "application/json"
-        context.response.print({status: "accepted", key: key}.to_json)
+        if wait
+          context.response.status_code = wait_for_commit(node) ? 200 : 408
+        else
+          context.response.status_code = 202
+        end
+        context.response.print({status: context.response.status_code == 200 ? "committed" : "accepted", key: key}.to_json)
       end
     else
       # Group doesn't exist — create it with initial value via meta consensus
@@ -326,9 +340,13 @@ class KVHttpHandler
         return
       end
       @meta_node.propose(KVCommand.new(KVAction::CreateGroup, key, value))
-      context.response.status_code = 202
       context.response.content_type = "application/json"
-      context.response.print({status: "accepted", key: key}.to_json)
+      if wait
+        context.response.status_code = wait_for_commit(@meta_node) ? 200 : 408
+      else
+        context.response.status_code = 202
+      end
+      context.response.print({status: context.response.status_code == 200 ? "committed" : "accepted", key: key}.to_json)
     end
   end
 

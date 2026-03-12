@@ -24,7 +24,7 @@ peers_str.split(",").each do |peer|
   parts = peer.strip.split(":")
   host = parts[0]
   port = parts[1].to_i
-  if match = host.match(/node-(\d+)/)
+  if match = host.match(/(?:node-|n)(\d+)/)
     peer_id = match[1].to_u64
   else
     raise "Cannot extract peer ID from hostname '#{host}'. Expected format: node-N"

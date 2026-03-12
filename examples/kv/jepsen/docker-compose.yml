@@ -1,0 +1,53 @@
+x-node: &default-node
+  build:
+    context: ../../..
+    dockerfile: examples/kv/jepsen/docker/Dockerfile.node
+  privileged: true
+  networks:
+    - jepsen
+
+services:
+  n1:
+    <<: *default-node
+    hostname: n1
+    container_name: jepsen-n1
+
+  n2:
+    <<: *default-node
+    hostname: n2
+    container_name: jepsen-n2
+
+  n3:
+    <<: *default-node
+    hostname: n3
+    container_name: jepsen-n3
+
+  n4:
+    <<: *default-node
+    hostname: n4
+    container_name: jepsen-n4
+
+  n5:
+    <<: *default-node
+    hostname: n5
+    container_name: jepsen-n5
+
+  control:
+    build:
+      context: ../../..
+      dockerfile: examples/kv/jepsen/docker/Dockerfile.control
+    hostname: control
+    container_name: jepsen-control
+    depends_on:
+      - n1
+      - n2
+      - n3
+      - n4
+      - n5
+    volumes:
+      - ./store:/jepsen/store
+    networks:
+      - jepsen
+
+networks:
+  jepsen:
