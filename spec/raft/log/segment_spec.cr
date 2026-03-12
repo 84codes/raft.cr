@@ -4,7 +4,7 @@ describe Raft::Log::Segment do
   it "appends and reads back entries" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, max_size: 1024_u32)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
 
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
@@ -21,14 +21,16 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
-  it "reports full when max size exceeded" do
+  it "reports capacity correctly" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, max_size: 30_u32)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 50_i64)
 
     entry = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("hello"))
+    segment.has_capacity_for?(30).should eq true
     segment.append(entry)
-    segment.full?.should eq true
+    # After writing ~30 bytes, no room for another ~30 byte entry in 50 byte segment
+    segment.has_capacity_for?(30).should eq false
 
     segment.close
     FileUtils.rm_rf(dir)
@@ -38,12 +40,12 @@ describe Raft::Log::Segment do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
 
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, max_size: 1024_u32)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
     entry = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("persist"))
     segment.append(entry)
     segment.close
 
-    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64, max_size: 1024_u32)
+    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
     segment2.read(1_u64).data.not_nil!.value.should eq "persist"
     segment2.count.should eq 1
 

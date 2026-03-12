@@ -309,6 +309,7 @@ module Raft
         apply_entries(@commit_index + 1, new_commit)
         @commit_index = new_commit
         @metrics.try(&.increment("raft_commit_advances_total"))
+        persist_state
       end
 
       @outbox << {msg.from, Message.new(
@@ -354,6 +355,7 @@ module Raft
           apply_entries(@commit_index + 1, n)
           @commit_index = n
           @metrics.try(&.increment("raft_commit_advances_total"))
+          persist_state
           break
         end
       end
@@ -509,6 +511,7 @@ module Raft
         else
           f.write_bytes(0_u8, IO::ByteFormat::LittleEndian)
         end
+        f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
       end
     end
 
@@ -519,6 +522,8 @@ module Raft
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
+        # commit_index was added later — handle old files without it
+        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) rescue 0_u64
       end
     end
   end

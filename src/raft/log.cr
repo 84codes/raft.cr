@@ -8,17 +8,23 @@ module Raft
 
     def initialize(@config : Config)
       Dir.mkdir_p(@config.data_dir)
-      new_segment(1_u64)
+      recover_segments
     end
 
     def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal) : LogEntry(T)
-      if current_segment.full?
-        new_segment(@last_index + 1)
-      end
-
       @last_index += 1
       @last_term = term
       entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data)
+
+      # Serialize to get the byte size, then check if it fits
+      io = IO::Memory.new
+      entry.to_io(io)
+      bytesize = io.pos
+
+      unless current_segment.has_capacity_for?(bytesize)
+        new_segment(@last_index, bytesize)
+      end
+
       current_segment.append(entry)
       entry
     end
@@ -52,7 +58,7 @@ module Raft
         old_path = File.join(@config.data_dir, "%016d.log" % seg.first_index)
         File.delete(old_path) if File.exists?(old_path)
 
-        new_seg = Segment(T).new(@config.data_dir, first_index: seg.first_index, max_size: @config.max_segment_size)
+        new_seg = Segment(T).new(@config.data_dir, first_index: seg.first_index, capacity: @config.max_segment_size.to_i64)
         entries.each { |e| new_seg.append(e) }
         @segments[-1] = new_seg
       end
@@ -83,8 +89,9 @@ module Raft
       @segments.last
     end
 
-    private def new_segment(first_index : UInt64)
-      @segments << Segment(T).new(@config.data_dir, first_index: first_index, max_size: @config.max_segment_size)
+    private def new_segment(first_index : UInt64, min_bytesize : Int = 0)
+      capacity = Math.max(@config.max_segment_size.to_i64, min_bytesize.to_i64)
+      @segments << Segment(T).new(@config.data_dir, first_index: first_index, capacity: capacity)
     end
 
     private def segment_for(index : UInt64) : Segment(T)
@@ -92,6 +99,29 @@ module Raft
         return seg if index >= seg.first_index && index <= seg.last_index
       end
       raise IndexError.new("No segment contains index #{index}")
+    end
+
+    private def recover_segments
+      files = Dir.glob(File.join(@config.data_dir, "*.log")).sort
+      if files.empty?
+        new_segment(1_u64)
+      else
+        files.each do |path|
+          # Skip empty segment files (e.g. created but never written to)
+          next if File.size(path) == 0
+          filename = File.basename(path, ".log")
+          first_index = filename.to_u64
+          seg = Segment(T).open(@config.data_dir, first_index: first_index)
+          @segments << seg
+        end
+        if @segments.empty?
+          new_segment(1_u64)
+        else
+          last_seg = @segments.last
+          @last_index = last_seg.last_index
+          @last_term = last_seg.count > 0 ? get(@last_index).term : 0_u64
+        end
+      end
     end
   end
 end
