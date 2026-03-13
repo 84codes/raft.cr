@@ -8,7 +8,7 @@ module Raft
     getter commit_index : UInt64 = 0_u64
     getter log : Log(T)
 
-    getter peers : Array(NodeID)
+    getter peers : Array(Peer)
     getter metrics : Metrics?
     {% if flag?(:raft_debug) %}
       getter paused : Bool = false
@@ -28,8 +28,15 @@ module Raft
     @pre_votes_received : Set(NodeID) = Set(NodeID).new
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
+    @on_configuration_change : Proc(Array(Peer), Nil)?
+    @pending_config_index : UInt64 = 0_u64
 
-    def initialize(@id : NodeID, @peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64)
+    def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64)
+      if peers.empty?
+        @peers = [] of Peer
+      else
+        @peers = peers.map { |pid| Peer.new(pid) } + [Peer.new(@id)]
+      end
       @log = Log(T).new(@config)
       @election_timeout = random_election_timeout
       recover_state
@@ -137,12 +144,70 @@ module Raft
 
     def transfer_leadership(to target : NodeID) : Bool
       return false unless @role == Role::Leader
-      return false unless @peers.includes?(target)
+      return false unless @peers.any? { |p| p.id == target && p.voter? }
       return false if target == @id
       @transfer_target = target
       @metrics.try(&.increment("raft_leadership_transfers_total", {"result" => "initiated"}))
       send_append_entries # ensure target is caught up
       maybe_send_timeout_now(target)
+      true
+    end
+
+    # Bootstrap this node as a single-node cluster.
+    # Only works when the node has no peers (fresh start).
+    def bootstrap : Bool
+      return false unless @peers.empty?
+      @peers = [Peer.new(@id)]
+      @current_term = 1_u64
+      @role = Role::Leader
+      @leader_id = @id
+      config_bytes = serialize_peers
+      @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
+      @commit_index = @log.last_index  # single-node cluster, immediately committed
+      persist_state
+      true
+    end
+
+    # Add a new node to the cluster as a learner.
+    # Returns false if not leader or node already exists.
+    def add_server(node_id : NodeID) : Bool
+      return false unless @role == Role::Leader
+      return false if @pending_config_index > @commit_index
+      return false if @peers.any? { |p| p.id == node_id }
+      new_peers = @peers.dup
+      new_peers << Peer.new(node_id, Peer::Role::Learner)
+      append_configuration(new_peers)
+      true
+    end
+
+    # Remove a node from the cluster.
+    # Returns false if not leader, node not found, or trying to remove self.
+    def remove_server(node_id : NodeID) : Bool
+      return false unless @role == Role::Leader
+      return false if @pending_config_index > @commit_index
+      return false if node_id == @id
+      return false unless @peers.any? { |p| p.id == node_id }
+      new_peers = @peers.reject { |p| p.id == node_id }
+      # Don't allow removal that would leave zero voters
+      return false unless new_peers.any?(&.voter?)
+      append_configuration(new_peers)
+      true
+    end
+
+    # Promote a learner to voter.
+    # Returns false if not leader or node is not a learner.
+    def promote_learner(node_id : NodeID) : Bool
+      return false unless @role == Role::Leader
+      return false if @pending_config_index > @commit_index
+      return false unless @peers.any? { |p| p.id == node_id && p.learner? }
+      new_peers = @peers.map do |p|
+        if p.id == node_id
+          Peer.new(p.id, Peer::Role::Voter)
+        else
+          p
+        end
+      end
+      append_configuration(new_peers)
       true
     end
 
@@ -161,20 +226,46 @@ module Raft
       messages
     end
 
+    def on_configuration_change(&block : Array(Peer) ->)
+      @on_configuration_change = block
+    end
+
     def close
       @inbox.close
       @log.close
     end
 
+    def voters : Array(Peer)
+      @peers.select(&.voter?)
+    end
+
+    def learners : Array(Peer)
+      @peers.select(&.learner?)
+    end
+
+    private def other_peers
+      @peers.reject { |p| p.id == @id }
+    end
+
+    private def other_voters
+      @peers.select { |p| p.id != @id && p.voter? }
+    end
+
+    private def quorum_size : Int32
+      voters.size // 2 + 1
+    end
+
     private def start_pre_vote
+      return if @peers.empty? # standalone node, no elections
+      return unless @peers.any? { |p| p.id == @id && p.voter? } # learners don't elect
       @election_tick = 0_u32
       @election_timeout = random_election_timeout
       @pre_votes_received = Set(NodeID).new
       @pre_votes_received.add(@id) # vote for self
       @metrics.try(&.increment("raft_prevote_campaigns_total"))
 
-      @peers.each do |peer|
-        @outbox << {peer, Message.new(
+      other_voters.each do |peer|
+        @outbox << {peer.id, Message.new(
           type: MessageType::PreVote,
           from: @id,
           term: @current_term + 1, # proposed term, not yet committed
@@ -198,8 +289,8 @@ module Raft
       @metrics.try(&.increment("raft_term_changes_total", {"reason" => "election"}))
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "candidate"}))
 
-      @peers.each do |peer|
-        @outbox << {peer, Message.new(
+      other_voters.each do |peer|
+        @outbox << {peer.id, Message.new(
           type: MessageType::RequestVote,
           from: @id,
           term: @current_term,
@@ -226,9 +317,9 @@ module Raft
       @role = Role::Leader
       @leader_id = @id
       @heartbeat_tick = 0_u32
-      @peers.each do |peer|
-        @next_index[peer] = @log.last_index + 1
-        @match_index[peer] = 0_u64
+      other_peers.each do |peer|
+        @next_index[peer.id] = @log.last_index + 1
+        @match_index[peer.id] = 0_u64
       end
       # Append no-op to force log convergence — truncates stale entries on followers
       @log.append(term: @current_term, entry_type: EntryType::Noop)
@@ -294,10 +385,16 @@ module Raft
             if @log.term_at(entry.index) != entry.term
               @metrics.try(&.increment("raft_log_truncations_total"))
               @log.truncate_after(entry.index - 1)
-              @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
+              @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type, config_data: entry.config_data)
             end
           else
-            @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type)
+            @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type, config_data: entry.config_data)
+          end
+          # Per Raft paper: apply configuration immediately when stored in log,
+          # regardless of commit status. This ensures removed nodes learn promptly.
+          if entry.entry_type == EntryType::Configuration
+            apply_configuration_from_entry(entry)
+            return if @peers.empty? # we were removed, stop processing
           end
         end
         @metrics.try(&.increment("raft_log_entries_received_total", by: msg.entries_count.to_i64))
@@ -333,6 +430,7 @@ module Raft
           @next_index[msg.from] = reported_index + 1
         end
         advance_commit_index
+        maybe_promote_learner(msg.from)
         if target = @transfer_target
           maybe_send_timeout_now(target) if msg.from == target
         end
@@ -346,12 +444,15 @@ module Raft
     private def advance_commit_index
       (@commit_index + 1..@log.last_index).reverse_each do |n|
         next unless @log.term_at(n) == @current_term
-        replication_count = 1 # count self
-        @peers.each do |peer|
-          replication_count += 1 if @match_index.fetch(peer, 0_u64) >= n
+        replication_count = 0
+        voters.each do |peer|
+          if peer.id == @id
+            replication_count += 1
+          elsif @match_index.fetch(peer.id, 0_u64) >= n
+            replication_count += 1
+          end
         end
-        quorum = (@peers.size + 1) // 2 + 1
-        if replication_count >= quorum
+        if replication_count >= quorum_size
           apply_entries(@commit_index + 1, n)
           @commit_index = n
           @metrics.try(&.increment("raft_commit_advances_total"))
@@ -364,7 +465,10 @@ module Raft
     private def apply_entries(from : UInt64, to : UInt64)
       (from..to).each do |i|
         entry = @log.get(i)
-        if data = entry.data
+        if entry.entry_type == EntryType::Configuration
+          apply_configuration(entry)
+          break if @peers.empty? # removed from cluster
+        elsif data = entry.data
           @state_machine.apply(data)
           @metrics.try(&.increment("raft_entries_applied_total"))
         end
@@ -373,6 +477,17 @@ module Raft
 
     private def handle_request_vote(msg : Message)
       vote_granted = false
+
+      # Reject votes from nodes not in our cluster
+      unless @peers.any? { |p| p.id == msg.from }
+        @outbox << {msg.from, Message.new(
+          type: MessageType::RequestVoteResponse,
+          from: @id,
+          term: @current_term,
+          success: false,
+        )}
+        return
+      end
 
       if msg.term >= @current_term
         if @voted_for.nil? || @voted_for == msg.from
@@ -406,42 +521,56 @@ module Raft
 
       if msg.success
         @votes_received.add(msg.from)
-        quorum = (@peers.size + 1) // 2 + 1
-        become_leader if @votes_received.size >= quorum
+        become_leader if @votes_received.size >= quorum_size
       end
     end
 
     private def send_append_entries
-      @peers.each do |peer|
-        next_idx = @next_index.fetch(peer, @log.last_index + 1)
-        prev_log_index = next_idx - 1
-        prev_log_term = prev_log_index > 0 ? @log.term_at(prev_log_index) : 0_u64
-
-        entries_io = IO::Memory.new
-        entries_count = 0_u32
-        (next_idx..@log.last_index).each do |i|
-          @log.get(i).to_io(entries_io)
-          entries_count += 1
-        end
-
-        @outbox << {peer, Message.new(
-          type: MessageType::AppendEntries,
-          from: @id,
-          term: @current_term,
-          prev_log_index: prev_log_index,
-          prev_log_term: prev_log_term,
-          commit_index: @commit_index,
-          entries_data: entries_io.to_slice.dup,
-          entries_count: entries_count,
-        )}
-        @metrics.try(&.increment("raft_messages_sent_total"))
-        @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
-        @metrics.try(&.increment("raft_log_entries_sent_total", by: entries_count.to_i64)) if entries_count > 0
+      other_peers.each do |peer|
+        send_append_entries_to(peer.id)
       end
+    end
+
+    private def send_append_entries_to(peer_id : NodeID)
+      next_idx = @next_index.fetch(peer_id, @log.last_index + 1)
+      prev_log_index = next_idx - 1
+      prev_log_term = prev_log_index > 0 ? @log.term_at(prev_log_index) : 0_u64
+
+      entries_io = IO::Memory.new
+      entries_count = 0_u32
+      (next_idx..@log.last_index).each do |i|
+        @log.get(i).to_io(entries_io)
+        entries_count += 1
+      end
+
+      @outbox << {peer_id, Message.new(
+        type: MessageType::AppendEntries,
+        from: @id,
+        term: @current_term,
+        prev_log_index: prev_log_index,
+        prev_log_term: prev_log_term,
+        commit_index: @commit_index,
+        entries_data: entries_io.to_slice.dup,
+        entries_count: entries_count,
+      )}
+      @metrics.try(&.increment("raft_messages_sent_total"))
+      @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
+      @metrics.try(&.increment("raft_log_entries_sent_total", by: entries_count.to_i64)) if entries_count > 0
     end
 
     private def handle_pre_vote(msg : Message)
       vote_granted = false
+
+      # Reject pre-votes from nodes not in our cluster
+      unless @peers.any? { |p| p.id == msg.from }
+        @outbox << {msg.from, Message.new(
+          type: MessageType::PreVoteResponse,
+          from: @id,
+          term: msg.term,
+          success: false,
+        )}
+        return
+      end
 
       # Grant pre-vote if:
       # 1. The candidate's proposed term is at least as high as ours
@@ -472,8 +601,7 @@ module Raft
 
       if msg.success
         @pre_votes_received.add(msg.from)
-        quorum = (@peers.size + 1) // 2 + 1
-        become_candidate if @pre_votes_received.size >= quorum
+        become_candidate if @pre_votes_received.size >= quorum_size
       end
     end
 
@@ -483,6 +611,13 @@ module Raft
       @metrics.try(&.increment("raft_timeout_now_received_total"))
       # Skip pre-vote, go straight to candidate
       become_candidate
+    end
+
+    private def maybe_promote_learner(node_id : NodeID)
+      return unless @peers.any? { |p| p.id == node_id && p.learner? }
+      match = @match_index.fetch(node_id, 0_u64)
+      return unless match >= @log.last_index
+      promote_learner(node_id)
     end
 
     private def maybe_send_timeout_now(target : NodeID)
@@ -495,6 +630,70 @@ module Raft
         from: @id,
         term: @current_term,
       )}
+    end
+
+    private def append_configuration(new_peers : Array(Peer))
+      config_bytes = serialize_peers(new_peers)
+      entry = @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
+      @pending_config_index = entry.index
+
+      # Initialize replication state for any new peers
+      new_peers.each do |p|
+        next if p.id == @id
+        unless @next_index.has_key?(p.id)
+          @next_index[p.id] = 1_u64 # send full log to new peers
+          @match_index[p.id] = 0_u64
+        end
+      end
+
+      # Send to union of old and new peers so both removed and added nodes
+      # receive the config entry
+      all_peer_ids = Set(NodeID).new
+      @peers.each { |p| all_peer_ids << p.id unless p.id == @id }
+      new_peers.each { |p| all_peer_ids << p.id unless p.id == @id }
+      all_peer_ids.each { |pid| send_append_entries_to(pid) }
+
+      # Track which peers were removed before switching config
+      removed = @peers.reject { |p| new_peers.any? { |np| np.id == p.id } }
+
+      # Switch to new configuration
+      @peers = new_peers
+      persist_state
+
+      # Clean up tracking for removed peers
+      removed.each do |p|
+        @next_index.delete(p.id)
+        @match_index.delete(p.id)
+      end
+    end
+
+    private def apply_configuration(entry : LogEntry(T))
+      @pending_config_index = 0_u64
+      @on_configuration_change.try(&.call(@peers))
+    end
+
+    # Apply configuration immediately when stored in log (followers).
+    # Per Raft paper: "a server always uses the latest configuration in its log,
+    # regardless of whether the entry is committed."
+    private def apply_configuration_from_entry(entry : LogEntry(T))
+      return if entry.config_data.empty?
+      new_peers = deserialize_peers(entry.config_data)
+      return if new_peers == @peers
+
+      unless new_peers.any? { |p| p.id == @id }
+        # We've been removed from the cluster — go back to standalone
+        @peers = [] of Peer
+        @role = Role::Follower
+        @leader_id = nil
+        @voted_for = nil
+        @commit_index = 0_u64
+        @log.reset
+        persist_state
+        return
+      end
+
+      @peers = new_peers
+      persist_state
     end
 
     private def random_election_timeout : UInt32
@@ -512,6 +711,8 @@ module Raft
           f.write_bytes(0_u8, IO::ByteFormat::LittleEndian)
         end
         f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
+        f.write_bytes(@peers.size.to_u32, IO::ByteFormat::LittleEndian)
+        @peers.each { |p| p.to_io(f) }
       end
     end
 
@@ -522,9 +723,25 @@ module Raft
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
-        # commit_index was added later — handle old files without it
         @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) rescue 0_u64
+        # Recover peers — handle old files without it
+        if (peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian) rescue nil)
+          @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
+        end
       end
+    end
+
+    private def serialize_peers(peers : Array(Peer) = @peers) : Bytes
+      io = IO::Memory.new
+      io.write_bytes(peers.size.to_u32, IO::ByteFormat::LittleEndian)
+      peers.each { |p| p.to_io(io) }
+      io.to_slice.dup
+    end
+
+    private def deserialize_peers(data : Bytes) : Array(Peer)
+      io = IO::Memory.new(data)
+      count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+      Array(Peer).new(count) { Peer.from_io(io) }
     end
   end
 end

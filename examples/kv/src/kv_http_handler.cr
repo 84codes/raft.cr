@@ -244,7 +244,7 @@ class KVHttpHandler
 
     # Group info with leader and follower node IDs as labels
     @nodes.each do |gid, node|
-      all_ids = ([node.id] + node.peers).sort
+      all_ids = node.peers.map(&.id).sort
       leader = node.leader_id || 0_u64
       followers = all_ids.reject { |id| id == leader }.join(",")
       context.response << "raft_kv_group_info{node_id=\"" << node_id << "\",group_id=\"" << gid << "\",leader=\"" << leader << "\",followers=\"" << followers << "\"} 1\n"
@@ -252,7 +252,7 @@ class KVHttpHandler
   end
 
   private def handle_rebalance(context)
-    all_peer_ids = ([@meta_node.id] + @meta_node.peers).sort
+    all_peer_ids = @meta_node.peers.map(&.id).sort
     groups = @meta_sm.all_groups.to_a
     transfers = [] of {String, UInt64, UInt64}
 
@@ -389,8 +389,7 @@ class KVHttpHandler
         @nodes.each_value(&.heal)
         json_response(context, 200, {"status" => "healed", "groups" => @nodes.size + 1})
       else
-        context.response.status_code = 404
-        context.response.print "Unknown admin action"
+        call_next(context)
       end
     end
 

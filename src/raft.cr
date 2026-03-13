@@ -4,6 +4,7 @@ end
 
 require "./raft/config"
 require "./raft/metrics"
+require "./raft/peer"
 require "./raft/message"
 require "./raft/log_entry"
 require "./raft/state_machine"

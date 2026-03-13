@@ -9,13 +9,16 @@ module Raft
     @channels : Hash(UInt64, Channel(Message)) = {} of UInt64 => Channel(Message)
     @server : TCPServer? = nil
     @running : Bool = false
+    @data_dir : String?
     getter outbox : Channel({NodeID, Message}) = Channel({NodeID, Message}).new(256)
 
-    def initialize(@listen_address : String, @listen_port : Int32)
+    def initialize(@listen_address : String, @listen_port : Int32, @data_dir : String? = nil)
+      recover_peers
     end
 
     def register_peer(id : NodeID, host : String, port : Int32)
       @peers[id] = {host, port}
+      persist_peers
     end
 
     def register_channel(group_id : UInt64, channel : Channel(Message))
@@ -94,6 +97,28 @@ module Raft
       end
     rescue IO::EOFError | IO::Error
       client.close rescue nil
+    end
+
+    private def persist_peers
+      if dir = @data_dir
+        File.open(File.join(dir, "transport_peers"), "w") do |f|
+          @peers.each do |id, (host, port)|
+            f.puts "#{id} #{host} #{port}"
+          end
+        end
+      end
+    end
+
+    private def recover_peers
+      if dir = @data_dir
+        path = File.join(dir, "transport_peers")
+        return unless File.exists?(path)
+        File.each_line(path) do |line|
+          parts = line.strip.split(" ")
+          next if parts.size < 3
+          @peers[parts[0].to_u64] = {parts[1], parts[2].to_i}
+        end
+      end
     end
   end
 end

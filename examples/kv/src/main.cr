@@ -14,35 +14,18 @@ Log.setup_from_env(default_level: :info)
 node_id = (ENV["NODE_ID"]? || "1").to_u64
 http_port = (ENV["HTTP_PORT"]? || "8001").to_i
 raft_port = (ENV["RAFT_PORT"]? || "9000").to_i
-peers_str = ENV["PEERS"]? || ""
+raft_advertise_address = ENV["RAFT_ADVERTISE_ADDRESS"]? || ""
 base_data_dir = ENV["DATA_DIR"]? || "/data/raft"
 
-# Parse peers: "node-2:9000,node-3:9000" -> [{id, host, port}]
-peer_configs = [] of {UInt64, String, Int32}
-peers_str.split(",").each do |peer|
-  next if peer.strip.empty?
-  parts = peer.strip.split(":")
-  host = parts[0]
-  port = parts[1].to_i
-  if match = host.match(/(?:node-|n)(\d+)/)
-    peer_id = match[1].to_u64
-  else
-    raise "Cannot extract peer ID from hostname '#{host}'. Expected format: node-N"
-  end
-  peer_configs << {peer_id, host, port}
-end
+Dir.mkdir_p(base_data_dir)
 
-peer_ids = peer_configs.map(&.[0])
-
-# Setup TCP transport
-transport = Raft::TCPTransport.new(listen_address: "0.0.0.0", listen_port: raft_port)
-peer_configs.each do |pc|
-  transport.register_peer(pc[0], pc[1], pc[2])
-end
+# Setup TCP transport (peers registered dynamically via TUI or recovered from disk)
+transport = Raft::TCPTransport.new(listen_address: "0.0.0.0", listen_port: raft_port, data_dir: base_data_dir)
 
 # Shared state
 nodes = Hash(UInt64, Raft::Node(KVCommand)).new
 value_machines = Hash(UInt64, ValueStateMachine).new
+meta_node_holder = [] of Raft::Node(KVCommand)
 
 # Start a group's event loop
 start_group_loop = ->(node : Raft::Node(KVCommand)) {
@@ -65,6 +48,13 @@ start_group_loop = ->(node : Raft::Node(KVCommand)) {
 
 # Helper to create a node for a group
 create_node = ->(group_id : UInt64, sm : Raft::StateMachine(KVCommand)) {
+  # Meta group starts with no peers (standalone until bootstrapped via TUI).
+  # Data groups inherit current cluster membership from meta group.
+  current_peer_ids = if group_id > 0_u64 && !meta_node_holder.empty?
+                       meta_node_holder[0].peers.map(&.id).reject { |id| id == node_id }
+                     else
+                       [] of UInt64
+                     end
   cfg = Raft::Config.new
   cfg.data_dir = File.join(base_data_dir, "group-#{group_id}")
   cfg.election_timeout_min_ticks = 10_u32
@@ -73,7 +63,7 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(KVCommand)) {
   Dir.mkdir_p(cfg.data_dir)
   metrics = Raft::Metrics.new(node_id: node_id, group_id: group_id)
   node = Raft::Node(KVCommand).new(
-    id: node_id, peers: peer_ids, config: cfg,
+    id: node_id, peers: current_peer_ids, config: cfg,
     state_machine: sm, metrics: metrics, group_id: group_id
   )
   nodes[group_id] = node
@@ -101,11 +91,33 @@ meta_sm = MetaStateMachine.new(on_delete_group) do |key, gid, initial_value|
 end
 
 meta_node = create_node.call(0_u64, meta_sm)
+meta_node_holder << meta_node
+
+# When meta group membership changes, reconcile all data groups
+meta_node.on_configuration_change do |new_peers|
+  peer_ids = new_peers.map(&.id).reject { |id| id == node_id }
+  nodes.each do |gid, data_node|
+    next if gid == 0_u64 # skip meta group itself
+    next unless data_node.role == Raft::Role::Leader
+    # Add new peers
+    new_peers.each do |p|
+      next if p.id == node_id
+      unless data_node.peers.any? { |dp| dp.id == p.id }
+        data_node.add_server(p.id)
+      end
+    end
+    # Collect IDs to remove first, then remove (avoids mutation during iteration)
+    to_remove = data_node.peers.select do |dp|
+      dp.id != node_id && !new_peers.any? { |p| p.id == dp.id }
+    end.map(&.id)
+    to_remove.each { |id| data_node.remove_server(id) }
+  end
+end
 
 transport.start
 
 # HTTP server
-raft_handler = Raft::HTTP::Handler(KVCommand).new(meta_node)
+raft_handler = Raft::HTTP::Handler(KVCommand).new(meta_node, transport, raft_advertise_address)
 kv_handler = KVHttpHandler.new(meta_node, meta_sm, nodes, value_machines)
 
 server = ::HTTP::Server.new([kv_handler, raft_handler]) do |context|

@@ -10,10 +10,11 @@ module Raft
       property leader_id : UInt64? = nil
       property commit_index : UInt64 = 0_u64
       property last_log_index : UInt64 = 0_u64
-      property peers : Array(UInt64) = [] of UInt64
+      property peers : Array({UInt64, String}) = [] of {UInt64, String}
       property paused : Bool = false
       property reachable : Bool = false
       property address : String = ""
+      property raft_address : String = ""
 
       def initialize(@address : String)
       end
@@ -67,6 +68,8 @@ module Raft
               node.leader_id = data["leader_id"].as_i64?.try(&.to_u64)
               node.commit_index = data["commit_index"].as_i64.to_u64
               node.last_log_index = data["last_log_index"].as_i64.to_u64
+              node.peers = data["peers"].as_a.map { |p| {p["id"].as_i64.to_u64, p["role"].as_s} }
+              node.raft_address = data["raft_address"]?.try(&.as_s) || ""
               node.paused = data["paused"]?.try(&.as_bool) || false
               node.reachable = true
 
@@ -100,7 +103,13 @@ module Raft
               role_display = case node.role
                              when "leader"    then "\e[32m██ LEADER\e[0m"
                              when "candidate" then "\e[33m░░ CANDIDATE\e[0m"
-                             else                  "\e[34m░░ FOLLOWER\e[0m"
+                             when "follower"
+                               if node.peers.empty?
+                                 "\e[90m░░ STANDALONE\e[0m"
+                               else
+                                 "\e[34m░░ FOLLOWER\e[0m"
+                               end
+                             else "\e[90m░░ STANDALONE\e[0m"
                              end
               line(io, "  Node #{node.id} (#{node.address})    #{role_display}   term: #{node.term}")
               if node.role == "leader"
@@ -121,8 +130,8 @@ module Raft
 
           line(io, "")
           line(io, "\e[1m\e[36m── Controls ──────────────────────────────────────────\e[0m")
-          line(io, "  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal")
-          line(io, "  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all  \e[1m[d]\e[0m Reset  \e[1m[b]\e[0m Rebalance  \e[1m[q]\e[0m Quit")
+          line(io, "  \e[1m[f]\e[0m Form cluster  \e[1m[B]\e[0m Bootstrap  \e[1m[j]\e[0m Join node  \e[1m[+]\e[0m Add server  \e[1m[-]\e[0m Remove server  \e[1m[b]\e[0m Rebalance")
+          line(io, "  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all  \e[1m[d]\e[0m Reset  \e[1m[q]\e[0m Quit")
         end
         STDOUT.write(buf.to_slice)
       end
@@ -153,8 +162,18 @@ module Raft
           prompt_node("Heal") { |id| heal_node(id) }
         when 'd'
           prompt_node("Reset") { |id| reset_node(id) }
+        when 'f'
+          form_cluster
+        when 'B'
+          prompt_node("Bootstrap node") { |id| bootstrap_node(id) }
+        when 'j'
+          prompt_node("Join node to cluster — node") { |id| join_node(id) }
         when 'b'
           rebalance
+        when '+'
+          prompt_node("Add server — node id") { |id| add_server(id) }
+        when '-'
+          prompt_node("Remove server — node id") { |id| remove_server(id) }
         end
       end
 
@@ -218,6 +237,211 @@ module Raft
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "reset")
           add_event("Reset Node #{id}")
+        end
+      end
+
+      private def bootstrap_node(id : Int32)
+        node = @nodes.find { |n| n.id == id.to_u64 && n.reachable }
+        unless node
+          # Fall back to positional index (1-based)
+          idx = id - 1
+          node = @nodes[idx]? if idx >= 0 && idx < @nodes.size
+        end
+        unless node && node.reachable
+          add_event("Node #{id} not found or not reachable")
+          return
+        end
+        begin
+          uri = URI.parse(node.address)
+          client = ::HTTP::Client.new(uri)
+          client.connect_timeout = 2.seconds
+          client.read_timeout = 2.seconds
+          response = client.post("/raft/admin/bootstrap")
+          if response.status_code == 200
+            add_event("Bootstrapped Node #{node.id} as leader")
+          else
+            add_event("Bootstrap failed: #{response.status_code} (already has peers?)")
+          end
+        rescue ex
+          add_event("Bootstrap failed: #{ex.message}")
+        end
+      end
+
+      private def form_cluster
+        reachable = @nodes.select(&.reachable)
+        if reachable.empty?
+          add_event("No reachable nodes")
+          return
+        end
+
+        # Bootstrap first reachable node as leader
+        first = reachable[0]
+        begin
+          uri = URI.parse(first.address)
+          client = ::HTTP::Client.new(uri)
+          client.connect_timeout = 2.seconds
+          client.read_timeout = 2.seconds
+          response = client.post("/raft/admin/bootstrap")
+          if response.status_code == 200
+            add_event("Bootstrapped Node (#{first.address}) as leader")
+          else
+            add_event("Bootstrap failed: #{response.status_code}")
+            return
+          end
+        rescue ex
+          add_event("Bootstrap failed: #{ex.message}")
+          return
+        end
+
+        sleep 500.milliseconds
+        poll_nodes # refresh to get raft_addresses and updated roles
+
+        leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+        unless leader
+          add_event("Bootstrap succeeded but leader not found")
+          return
+        end
+
+        # Join all other reachable nodes
+        others = reachable.reject { |n| n.address == first.address }
+        others.each do |node|
+          join_node_to_cluster(node, leader)
+          sleep 200.milliseconds
+        end
+      end
+
+      private def join_node(id : Int32)
+        node = @nodes.find { |n| n.id == id.to_u64 }
+        unless node
+          add_event("Node #{id} not found")
+          return
+        end
+        leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+        unless leader
+          add_event("No reachable leader found")
+          return
+        end
+        join_node_to_cluster(node, leader)
+      end
+
+      private def join_node_to_cluster(node : NodeStatus, leader : NodeStatus)
+        # Register transport peers bidirectionally between new node and all cluster members
+        cluster_members = @nodes.select { |n| n.reachable && n.address != node.address && !n.peers.empty? }
+        cluster_members << leader unless cluster_members.any? { |n| n.address == leader.address }
+
+        cluster_members.each do |member|
+          register_transport_peer(member.address, node.id, node.raft_address)
+          register_transport_peer(node.address, member.id, member.raft_address)
+        end
+
+        # Add server via leader
+        begin
+          uri = URI.parse(leader.address)
+          client = ::HTTP::Client.new(uri)
+          client.connect_timeout = 2.seconds
+          client.read_timeout = 2.seconds
+          response = client.post("/raft/admin/add_server/#{node.id}")
+          if response.status_code == 200
+            add_event("Added Node #{node.id} to cluster via leader (Node #{leader.id})")
+          else
+            add_event("Failed to add Node #{node.id}: #{response.status_code}")
+          end
+        rescue ex
+          add_event("Failed to add Node #{node.id}: #{ex.message}")
+        end
+      end
+
+      private def register_transport_peer(target_address : String, peer_id : UInt64, peer_raft_address : String)
+        return if peer_raft_address.empty?
+        parts = peer_raft_address.split(":")
+        host = parts[0]
+        port = parts[1]?.try(&.to_i) || 9000
+        begin
+          uri = URI.parse(target_address)
+          client = ::HTTP::Client.new(uri)
+          client.connect_timeout = 2.seconds
+          client.read_timeout = 2.seconds
+          body = {id: peer_id, host: host, port: port}.to_json
+          client.post("/raft/admin/register_peer", body: body, headers: ::HTTP::Headers{"Content-Type" => "application/json"})
+        rescue
+        end
+      end
+
+      private def add_server(id : Int32)
+        if leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+          begin
+            uri = URI.parse(leader.address)
+            client = ::HTTP::Client.new(uri)
+            client.connect_timeout = 2.seconds
+            client.read_timeout = 2.seconds
+            response = client.post("/raft/admin/add_server/#{id}")
+            if response.status_code == 200
+              add_event("Added node #{id} as learner via leader (Node #{leader.id})")
+            else
+              add_event("Failed to add node #{id}: #{response.status_code}")
+            end
+          rescue ex
+            add_event("Failed to add node #{id}: #{ex.message}")
+          end
+        else
+          add_event("No reachable leader found")
+        end
+      end
+
+      private def remove_server(id : Int32)
+        leader = @nodes.find { |n| n.role == "leader" && n.reachable }
+        unless leader
+          add_event("No reachable leader found")
+          return
+        end
+
+        # If removing the leader, transfer leadership first
+        if leader.id == id.to_u64
+          target = @nodes.find { |n| n.reachable && n.id != leader.id && n.peers.any? { |_, role| role == "voter" } }
+          unless target
+            add_event("No other voter to transfer leadership to")
+            return
+          end
+          begin
+            uri = URI.parse(leader.address)
+            client = ::HTTP::Client.new(uri)
+            client.connect_timeout = 2.seconds
+            client.read_timeout = 2.seconds
+            response = client.post("/raft/admin/transfer_leadership/#{target.id}")
+            if response.status_code == 200
+              add_event("Transferring leadership from Node #{leader.id} to Node #{target.id}")
+            else
+              add_event("Failed to transfer leadership: #{response.status_code}")
+              return
+            end
+          rescue ex
+            add_event("Failed to transfer leadership: #{ex.message}")
+            return
+          end
+          # Wait for new leader to emerge
+          sleep 2.seconds
+          poll_nodes
+          leader = @nodes.find { |n| n.role == "leader" && n.reachable && n.id != id.to_u64 }
+          unless leader
+            add_event("Leadership transfer failed — no new leader found")
+            return
+          end
+          add_event("New leader is Node #{leader.id}")
+        end
+
+        begin
+          uri = URI.parse(leader.address)
+          client = ::HTTP::Client.new(uri)
+          client.connect_timeout = 2.seconds
+          client.read_timeout = 2.seconds
+          response = client.post("/raft/admin/remove_server/#{id}")
+          if response.status_code == 200
+            add_event("Removed node #{id} via leader (Node #{leader.id})")
+          else
+            add_event("Failed to remove node #{id}: #{response.status_code}")
+          end
+        rescue ex
+          add_event("Failed to remove node #{id}: #{ex.message}")
         end
       end
 

@@ -7,8 +7,10 @@ module Raft
       include ::HTTP::Handler
 
       @node : Node(T)
+      @transport : TCPTransport?
+      @raft_address : String?
 
-      def initialize(@node : Node(T))
+      def initialize(@node : Node(T), @transport : TCPTransport? = nil, @raft_address : String? = nil)
       end
 
       def call(context : ::HTTP::Server::Context)
@@ -23,12 +25,10 @@ module Raft
         when {"GET", "/raft/metrics"}
           handle_metrics(context)
         else
-          {% if flag?(:raft_debug) %}
-            if method == "POST" && path.starts_with?("/raft/admin/")
-              handle_admin(context, path)
-              return
-            end
-          {% end %}
+          if method == "POST" && path.starts_with?("/raft/admin/")
+            handle_admin(context, path)
+            return
+          end
           call_next(context)
         end
       end
@@ -40,12 +40,18 @@ module Raft
             j.field "id", @node.id
             j.field "role", @node.role.to_s.downcase
             j.field "term", @node.current_term
+            j.field "raft_address", @raft_address if @raft_address
             j.field "leader_id", leader_id
             j.field "commit_index", @node.commit_index
             j.field "last_log_index", @node.log.last_index
             j.field "peers" do
               j.array do
-                @node.peers.each { |p| j.number(p) }
+                @node.peers.each do |p|
+                  j.object do
+                    j.field "id", p.id
+                    j.field "role", p.role.to_s.downcase
+                  end
+                end
               end
             end
             {% if flag?(:raft_debug) %}
@@ -90,8 +96,72 @@ module Raft
         end
       end
 
+      private def handle_admin(context, path)
+        case path
+        when "/raft/admin/bootstrap"
+          if @node.bootstrap
+            json_response(context, 200, {"status" => "bootstrapped"})
+          else
+            json_response(context, 400, {"error" => "failed to bootstrap (node may already have peers)"})
+          end
+        when "/raft/admin/register_peer"
+          if transport = @transport
+            body = context.request.body.try(&.gets_to_end)
+            if body
+              data = JSON.parse(body)
+              id = data["id"].as_i64.to_u64
+              host = data["host"].as_s
+              port = data["port"].as_i
+              transport.register_peer(id, host, port)
+              json_response(context, 200, {"status" => "registered", "id" => id.to_s})
+            else
+              json_response(context, 400, {"error" => "missing body"})
+            end
+          else
+            json_response(context, 503, {"error" => "no transport configured"})
+          end
+        else
+          if path.starts_with?("/raft/admin/add_server/")
+            node_id = path.split("/").last.to_u64
+            if @node.add_server(node_id)
+              json_response(context, 200, {"status" => "added", "node_id" => node_id.to_s})
+            else
+              json_response(context, 400, {"error" => "failed to add server"})
+            end
+          elsif path.starts_with?("/raft/admin/remove_server/")
+            node_id = path.split("/").last.to_u64
+            if @node.remove_server(node_id)
+              json_response(context, 200, {"status" => "removed", "node_id" => node_id.to_s})
+            else
+              json_response(context, 400, {"error" => "failed to remove server"})
+            end
+          elsif path.starts_with?("/raft/admin/promote_learner/")
+            node_id = path.split("/").last.to_u64
+            if @node.promote_learner(node_id)
+              json_response(context, 200, {"status" => "promoted", "node_id" => node_id.to_s})
+            else
+              json_response(context, 400, {"error" => "failed to promote learner"})
+            end
+          elsif path.starts_with?("/raft/admin/transfer_leadership/")
+            node_id = path.split("/").last.to_u64
+            if @node.transfer_leadership(to: node_id)
+              json_response(context, 200, {"status" => "transferring", "target" => node_id.to_s})
+            else
+              json_response(context, 400, {"error" => "failed to transfer leadership"})
+            end
+          else
+            {% if flag?(:raft_debug) %}
+              handle_debug_admin(context, path)
+            {% else %}
+              context.response.status_code = 404
+              context.response.print "Unknown admin action"
+            {% end %}
+          end
+        end
+      end
+
       {% if flag?(:raft_debug) %}
-        private def handle_admin(context, path)
+        private def handle_debug_admin(context, path)
           case path
           when "/raft/admin/pause"
             @node.pause

@@ -6,9 +6,9 @@ services:
       dockerfile: examples/kv/Dockerfile
     environment:
       NODE_ID: "1"
-      PEERS: "node-2:9000,node-3:9000"
       HTTP_PORT: "8001"
       RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-1:9000"
       DATA_DIR: "/data/raft"
     ports:
       - "8001:8001"
@@ -21,9 +21,9 @@ services:
       dockerfile: examples/kv/Dockerfile
     environment:
       NODE_ID: "2"
-      PEERS: "node-1:9000,node-3:9000"
       HTTP_PORT: "8002"
       RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-2:9000"
       DATA_DIR: "/data/raft"
     ports:
       - "8002:8002"
@@ -36,9 +36,9 @@ services:
       dockerfile: examples/kv/Dockerfile
     environment:
       NODE_ID: "3"
-      PEERS: "node-1:9000,node-2:9000"
       HTTP_PORT: "8003"
       RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-3:9000"
       DATA_DIR: "/data/raft"
     ports:
       - "8003:8003"

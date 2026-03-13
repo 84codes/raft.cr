@@ -348,9 +348,10 @@ describe Raft::Node do
   {% end %}
 
   describe "peers" do
-    it "exposes peer list" do
+    it "exposes peer list including self" do
       node = create_test_node(1_u64, [2_u64, 3_u64])
-      node.peers.should eq [2_u64, 3_u64]
+      node.peers.map(&.id).sort.should eq [1_u64, 2_u64, 3_u64]
+      node.peers.all?(&.voter?).should eq true
       node.close
     end
   end
@@ -404,6 +405,592 @@ describe Raft::Node do
 
       node2.close
       FileUtils.rm_rf(dir)
+    end
+  end
+
+  describe "membership changes" do
+    it "add_server adds a learner" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      nodes[1_u64].role.should eq Raft::Role::Leader
+
+      result = nodes[1_u64].add_server(4_u64)
+      result.should eq true
+
+      # Node 4 should be a learner
+      peer4 = nodes[1_u64].peers.find { |p| p.id == 4_u64 }
+      peer4.should_not be_nil
+      peer4.not_nil!.learner?.should eq true
+
+      # Quorum should still be based on 3 voters (self + 2 original peers)
+      nodes[1_u64].voters.size.should eq 3
+
+      nodes.each_value(&.close)
+    end
+
+    it "add_server rejects if not leader" do
+      node = create_test_node(1_u64, [2_u64, 3_u64])
+      node.role.should eq Raft::Role::Follower
+      node.add_server(4_u64).should eq false
+      node.close
+    end
+
+    it "add_server rejects duplicate node" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      nodes[1_u64].add_server(2_u64).should eq false
+      nodes.each_value(&.close)
+    end
+
+    it "promote_learner promotes to voter" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      leader.add_server(4_u64)
+
+      # Commit the add_server config change before promoting
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if nodes.has_key?(target_id)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      leader.promote_learner(4_u64).should eq true
+
+      peer4 = leader.peers.find { |p| p.id == 4_u64 }
+      peer4.not_nil!.voter?.should eq true
+      leader.voters.size.should eq 4
+
+      nodes.each_value(&.close)
+    end
+
+    it "promote_learner rejects if node is already a voter" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      nodes[1_u64].promote_learner(2_u64).should eq false
+      nodes.each_value(&.close)
+    end
+
+    it "remove_server removes a node" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+
+      nodes[1_u64].remove_server(3_u64).should eq true
+      nodes[1_u64].peers.any? { |p| p.id == 3_u64 }.should eq false
+      nodes[1_u64].voters.size.should eq 2
+
+      nodes.each_value(&.close)
+    end
+
+    it "remove_server rejects removing self" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      nodes[1_u64].remove_server(1_u64).should eq false
+      nodes.each_value(&.close)
+    end
+
+    it "remove_server rejects if not leader" do
+      node = create_test_node(1_u64, [2_u64, 3_u64])
+      node.remove_server(2_u64).should eq false
+      node.close
+    end
+
+    it "removed node goes back to standalone" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Remove node 3
+      leader.remove_server(3_u64).should eq true
+
+      # Deliver AppendEntries (with config entry in log) to node 3
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if target_id == 3_u64
+      end
+
+      # Node 3 should be standalone now
+      nodes[3_u64].peers.should be_empty
+      nodes[3_u64].role.should eq Raft::Role::Follower
+      nodes[3_u64].commit_index.should eq 0_u64
+      nodes[3_u64].log.last_index.should eq 0_u64
+
+      # Drain any pending responses from the removal notification
+      nodes[3_u64].take_messages
+
+      # Node 3 should not start elections
+      10.times { nodes[3_u64].tick }
+      nodes[3_u64].role.should eq Raft::Role::Follower
+      nodes[3_u64].take_messages.should be_empty
+
+      nodes.each_value(&.close)
+    end
+
+    it "remove_server rejects if it would leave zero voters" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64], config),
+      }
+      elect_leader(nodes)
+
+      # Removing node 2 would leave only node 1 (self) — allowed
+      nodes[1_u64].remove_server(2_u64).should eq true
+
+      # But now we can't remove self (existing guard)
+      nodes[1_u64].remove_server(1_u64).should eq false
+
+      nodes.each_value(&.close)
+    end
+
+    it "learners receive replication but don't affect quorum" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Add node 4 as learner
+      leader.add_server(4_u64)
+
+      # Leader should send AppendEntries to all peers including the learner
+      messages = leader.take_messages
+      target_ids = messages.map { |tid, _| tid }.uniq.sort
+      target_ids.should eq [2_u64, 3_u64, 4_u64]
+
+      # Propose a value — quorum is still 2 (out of 3 voters)
+      leader.propose(TestData.new("test"))
+
+      # Deliver to node 2 only (quorum = self + node2 = 2 out of 3 voters)
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        if target_id == 2_u64
+          nodes[2_u64].step(msg)
+        end
+      end
+
+      # Deliver response from node 2
+      nodes[2_u64].take_messages.each do |target_id, msg|
+        leader.step(msg) if target_id == 1_u64
+      end
+
+      # Commit should advance — learner node 4 not needed for quorum
+      leader.commit_index.should be > 0
+
+      nodes.each_value(&.close)
+    end
+
+    it "persists and recovers membership changes" do
+      dir = File.tempname("raft_membership")
+      Dir.mkdir_p(dir)
+
+      c1 = Raft::Config.new
+      c1.data_dir = dir
+      c1.election_timeout_min_ticks = 5_u32
+      c1.election_timeout_max_ticks = 5_u32
+      c1.heartbeat_ticks = 100_u32
+
+      c2 = Raft::Config.new
+      c2.data_dir = File.tempname("raft_node_2")
+      c2.election_timeout_min_ticks = 5_u32
+      c2.election_timeout_max_ticks = 5_u32
+      c2.heartbeat_ticks = 100_u32
+      Dir.mkdir_p(c2.data_dir)
+
+      c3 = Raft::Config.new
+      c3.data_dir = File.tempname("raft_node_3")
+      c3.election_timeout_min_ticks = 5_u32
+      c3.election_timeout_max_ticks = 5_u32
+      c3.heartbeat_ticks = 100_u32
+      Dir.mkdir_p(c3.data_dir)
+
+      nodes = {
+        1_u64 => Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1, state_machine: TestStateMachine.new),
+        2_u64 => Raft::Node(TestData).new(id: 2_u64, peers: [1_u64, 3_u64], config: c2, state_machine: TestStateMachine.new),
+        3_u64 => Raft::Node(TestData).new(id: 3_u64, peers: [1_u64, 2_u64], config: c3, state_machine: TestStateMachine.new),
+      }
+      elect_leader(nodes)
+
+      # Add node 4 and commit the config change before promoting
+      leader = nodes[1_u64]
+      leader.add_server(4_u64)
+
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if nodes.has_key?(target_id)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      leader.promote_learner(4_u64)
+      leader.peers.size.should eq 4
+      leader.close
+
+      # Recover node 1 — should have 4 peers from persisted state
+      c1_recover = Raft::Config.new
+      c1_recover.data_dir = dir
+      c1_recover.election_timeout_min_ticks = 5_u32
+      c1_recover.election_timeout_max_ticks = 5_u32
+
+      node_recovered = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1_recover, state_machine: TestStateMachine.new)
+      node_recovered.peers.size.should eq 4
+      node_recovered.peers.map(&.id).sort.should eq [1_u64, 2_u64, 3_u64, 4_u64]
+      node_recovered.peers.all?(&.voter?).should eq true
+
+      node_recovered.close
+      nodes[2_u64].close
+      nodes[3_u64].close
+      FileUtils.rm_rf(dir)
+      FileUtils.rm_rf(c2.data_dir)
+      FileUtils.rm_rf(c3.data_dir)
+    end
+
+    it "bootstrap writes a configuration entry to the log" do
+      node = create_test_node(1_u64, [] of UInt64)
+      node.bootstrap
+
+      node.log.last_index.should eq 1_u64
+      entry = node.log.get(1_u64)
+      entry.entry_type.should eq Raft::EntryType::Configuration
+      entry.config_data.size.should be > 0
+
+      node.close
+    end
+
+    it "bootstrap creates single-node cluster" do
+      node = create_test_node(1_u64, [] of UInt64)
+      node.role.should eq Raft::Role::Follower
+      node.peers.should be_empty
+
+      result = node.bootstrap
+      result.should eq true
+      node.role.should eq Raft::Role::Leader
+      node.current_term.should eq 1_u64
+      node.peers.size.should eq 1
+      node.peers[0].id.should eq 1_u64
+      node.peers[0].voter?.should eq true
+      node.leader_id.should eq 1_u64
+
+      node.close
+    end
+
+    it "bootstrap fails if node already has peers" do
+      node = create_test_node(1_u64, [2_u64, 3_u64])
+      node.bootstrap.should eq false
+      node.close
+    end
+
+    it "bootstrap node can then add servers" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      node = create_test_node(1_u64, [] of UInt64, config)
+      node.bootstrap.should eq true
+      node.role.should eq Raft::Role::Leader
+
+      node.add_server(2_u64).should eq true
+      node.peers.size.should eq 2
+      peer2 = node.peers.find { |p| p.id == 2_u64 }
+      peer2.not_nil!.learner?.should eq true
+
+      node.close
+    end
+
+    it "standalone node does not start elections" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 2_u32
+      config.election_timeout_max_ticks = 2_u32
+
+      node = create_test_node(1_u64, [] of UInt64, config)
+      10.times { node.tick }
+      node.role.should eq Raft::Role::Follower
+      node.current_term.should eq 0_u64
+      node.take_messages.should be_empty
+
+      node.close
+    end
+
+    it "rejects concurrent configuration changes" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # First config change should succeed
+      leader.add_server(4_u64).should eq true
+
+      # Second config change should be rejected (first is uncommitted)
+      leader.add_server(5_u64).should eq false
+
+      # Commit the first change by replicating and getting responses
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if nodes.has_key?(target_id)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      # Now the second config change should succeed
+      leader.add_server(5_u64).should eq true
+
+      nodes.each_value(&.close)
+    end
+
+    it "automatically promotes learner when caught up" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+        4_u64 => create_test_node(4_u64, [] of UInt64, config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Add node 4 as learner
+      leader.add_server(4_u64)
+      leader.peers.find { |p| p.id == 4_u64 }.not_nil!.learner?.should eq true
+
+      # Send AppendEntries to all peers including node 4
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if nodes.has_key?(target_id)
+      end
+
+      # Deliver responses from voters first to commit the config change
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      # Now deliver response from node 4 — should trigger auto-promotion
+      # since the add_server config is committed and node 4 is caught up
+      nodes[4_u64].take_messages.each do |target_id, msg|
+        leader.step(msg) if target_id == 1_u64
+      end
+
+      # Node 4 should now be a voter
+      peer4 = leader.peers.find { |p| p.id == 4_u64 }
+      peer4.not_nil!.voter?.should eq true
+      leader.voters.size.should eq 4
+
+      nodes.each_value(&.close)
+    end
+
+    it "rejects RequestVote from non-member" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
+
+      vote_msg = Raft::Message.new(
+        type: Raft::MessageType::RequestVote,
+        from: 99_u64,
+        term: 1_u64,
+        last_log_index: 0_u64,
+        last_log_term: 0_u64,
+      )
+      node.step(vote_msg)
+
+      messages = node.take_messages
+      messages.size.should eq 1
+      messages[0][0].should eq 99_u64
+      messages[0][1].success.should eq false
+
+      node.close
+    end
+
+    it "rejects PreVote from non-member" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
+
+      prevote_msg = Raft::Message.new(
+        type: Raft::MessageType::PreVote,
+        from: 99_u64,
+        term: 1_u64,
+        last_log_index: 0_u64,
+        last_log_term: 0_u64,
+      )
+      node.step(prevote_msg)
+
+      messages = node.take_messages
+      messages.size.should eq 1
+      messages[0][0].should eq 99_u64
+      messages[0][1].success.should eq false
+
+      node.close
+    end
+
+    it "follower applies configuration entry from leader (add node)" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Add node 4 on the leader
+      leader.add_server(4_u64)
+
+      # Deliver to follower node 2
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg) if target_id == 2_u64
+      end
+
+      # Follower should now know about node 4
+      nodes[2_u64].peers.any? { |p| p.id == 4_u64 }.should eq true
+
+      nodes.each_value(&.close)
+    end
+
+    it "learner does not start elections" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 2_u32
+      config.election_timeout_max_ticks = 2_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Add node 4 as learner — send config to node 4 so it knows it's a learner
+      leader.add_server(4_u64)
+      node4 = create_test_node(4_u64, [] of UInt64, config)
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        node4.step(msg) if target_id == 4_u64
+      end
+
+      # Node 4 should have peers now (applied config from leader)
+      node4.peers.size.should be > 0
+      # And should be a learner
+      node4.peers.find { |p| p.id == 4_u64 }.not_nil!.learner?.should eq true
+
+      # Drain any pending responses from replication
+      node4.take_messages
+
+      # Node 4 should NOT start elections even after many ticks
+      10.times { node4.tick }
+      node4.role.should eq Raft::Role::Follower
+      node4.take_messages.should be_empty
+
+      node4.close
+      nodes.each_value(&.close)
     end
   end
 end

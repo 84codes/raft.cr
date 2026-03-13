@@ -11,10 +11,10 @@ module Raft
       recover_segments
     end
 
-    def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal) : LogEntry(T)
+    def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal, config_data : Bytes = Bytes.new(0)) : LogEntry(T)
       @last_index += 1
       @last_term = term
-      entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data)
+      entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data, config_data: config_data)
 
       # Serialize to get the byte size, then check if it fits
       io = IO::Memory.new
