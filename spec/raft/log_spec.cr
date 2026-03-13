@@ -64,6 +64,85 @@ describe Raft::Log do
     FileUtils.rm_rf(dir)
   end
 
+  it "truncate within a segment survives recovery" do
+    dir = File.tempname("raft_log")
+    Dir.mkdir_p(dir)
+    config = Raft::Config.new
+    config.data_dir = dir
+    config.max_segment_size = 1024_u32
+
+    log = Raft::Log(TestData).new(config)
+    log.append(term: 1_u64, data: TestData.new("a"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 1_u64, data: TestData.new("b"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 2_u64, data: TestData.new("c"), entry_type: Raft::EntryType::Normal)
+
+    log.truncate_after(2_u64)
+    log.last_index.should eq 2_u64
+    log.close
+
+    # Reopen — should recover only entries 1 and 2
+    log2 = Raft::Log(TestData).new(config)
+    log2.last_index.should eq 2_u64
+    log2.last_term.should eq 1_u64
+    log2.get(1_u64).data.not_nil!.value.should eq "a"
+    log2.get(2_u64).data.not_nil!.value.should eq "b"
+    log2.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "truncate across segment boundaries" do
+    dir = File.tempname("raft_log")
+    Dir.mkdir_p(dir)
+    config = Raft::Config.new
+    config.data_dir = dir
+    config.max_segment_size = 50_u32 # forces segment rotation
+
+    log = Raft::Log(TestData).new(config)
+    log.append(term: 1_u64, data: TestData.new("a"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 1_u64, data: TestData.new("b"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 2_u64, data: TestData.new("c"), entry_type: Raft::EntryType::Normal)
+    log.segment_count.should be > 1
+
+    log.truncate_after(1_u64)
+    log.last_index.should eq 1_u64
+    log.get(1_u64).data.not_nil!.value.should eq "a"
+    log.close
+
+    # Reopen — should recover only entry 1
+    log2 = Raft::Log(TestData).new(config)
+    log2.last_index.should eq 1_u64
+    log2.last_term.should eq 1_u64
+    log2.get(1_u64).data.not_nil!.value.should eq "a"
+    log2.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "segment file on disk is smaller after truncation" do
+    dir = File.tempname("raft_log")
+    Dir.mkdir_p(dir)
+    config = Raft::Config.new
+    config.data_dir = dir
+    config.max_segment_size = 1024_u32
+
+    log = Raft::Log(TestData).new(config)
+    log.append(term: 1_u64, data: TestData.new("a"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 1_u64, data: TestData.new("b"), entry_type: Raft::EntryType::Normal)
+    log.append(term: 2_u64, data: TestData.new("c"), entry_type: Raft::EntryType::Normal)
+    log.close
+
+    path = File.join(dir, "%016d.log" % 1)
+    full_size = File.size(path)
+
+    log2 = Raft::Log(TestData).new(config)
+    log2.truncate_after(1_u64)
+    log2.close
+
+    truncated_size = File.size(path)
+    truncated_size.should be < full_size
+
+    FileUtils.rm_rf(dir)
+  end
+
   it "recovers entries from disk on restart" do
     dir = File.tempname("raft_log")
     Dir.mkdir_p(dir)

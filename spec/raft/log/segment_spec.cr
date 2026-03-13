@@ -36,6 +36,93 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
+  it "truncates in place and reads remaining entries" do
+    dir = File.tempname("raft_segment")
+    Dir.mkdir_p(dir)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+
+    entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
+    entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
+    entry3 = Raft::LogEntry(TestData).new(term: 2_u64, index: 3_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("third"))
+
+    segment.append(entry1)
+    segment.append(entry2)
+    segment.append(entry3)
+
+    segment.truncate_to(2_u64)
+
+    segment.count.should eq 2
+    segment.last_index.should eq 2_u64
+    segment.read(1_u64).data.not_nil!.value.should eq "first"
+    segment.read(2_u64).data.not_nil!.value.should eq "second"
+    expect_raises(IndexError) { segment.read(3_u64) }
+
+    segment.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "truncated segment file is smaller on disk" do
+    dir = File.tempname("raft_segment")
+    Dir.mkdir_p(dir)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+
+    entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
+    entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
+    entry3 = Raft::LogEntry(TestData).new(term: 2_u64, index: 3_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("third"))
+
+    segment.append(entry1)
+    segment.append(entry2)
+    segment.append(entry3)
+    segment.close
+
+    # Record full size on disk
+    path = File.join(dir, "%016d.log" % 1)
+    full_size = File.size(path)
+
+    # Reopen and truncate
+    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    segment2.truncate_to(1_u64)
+    segment2.close
+
+    truncated_size = File.size(path)
+    truncated_size.should be < full_size
+
+    # Reopen after truncation — should recover only entry 1
+    segment3 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    segment3.count.should eq 1
+    segment3.last_index.should eq 1_u64
+    segment3.read(1_u64).data.not_nil!.value.should eq "first"
+    segment3.close
+
+    FileUtils.rm_rf(dir)
+  end
+
+  it "truncate_to recovers correctly after reopen" do
+    dir = File.tempname("raft_segment")
+    Dir.mkdir_p(dir)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+
+    entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("alpha"))
+    entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("beta"))
+    entry3 = Raft::LogEntry(TestData).new(term: 2_u64, index: 3_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("gamma"))
+
+    segment.append(entry1)
+    segment.append(entry2)
+    segment.append(entry3)
+
+    segment.truncate_to(2_u64)
+    segment.close
+
+    # Reopen and verify recovery sees only the first 2 entries
+    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    segment2.count.should eq 2
+    segment2.last_index.should eq 2_u64
+    segment2.read(1_u64).data.not_nil!.value.should eq "alpha"
+    segment2.read(2_u64).data.not_nil!.value.should eq "beta"
+    segment2.close
+    FileUtils.rm_rf(dir)
+  end
+
   it "reopens and reads existing segment" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)

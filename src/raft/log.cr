@@ -39,28 +39,17 @@ module Raft
     end
 
     def truncate_after(index : UInt64)
-      # Remove segments that start entirely after index
+      # Remove segments entirely past the target index
       while @segments.size > 1 && @segments.last.first_index > index
         seg = @segments.pop
+        path = File.join(@config.data_dir, "%016d.log" % seg.first_index)
         seg.close
+        File.delete(path) if File.exists?(path)
       end
 
-      # Rebuild the last segment up to index if needed
-      seg = @segments.last
-      if seg.last_index > index
-        entries = [] of LogEntry(T)
-        (seg.first_index..index).each do |i|
-          entries << seg.read(i)
-        end
-        seg.close
-
-        # Delete old segment file first
-        old_path = File.join(@config.data_dir, "%016d.log" % seg.first_index)
-        File.delete(old_path) if File.exists?(old_path)
-
-        new_seg = Segment(T).new(@config.data_dir, first_index: seg.first_index, capacity: @config.max_segment_size.to_i64)
-        entries.each { |e| new_seg.append(e) }
-        @segments[-1] = new_seg
+      # Truncate the last segment in place
+      if @segments.last.last_index > index && index >= @segments.last.first_index
+        @segments.last.truncate_to(index)
       end
 
       @last_index = index

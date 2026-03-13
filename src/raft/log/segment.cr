@@ -48,6 +48,22 @@ module Raft
         LogEntry(T).from_io(@file)
       end
 
+      def truncate_to(index : UInt64)
+        return if index >= @last_index
+        return if index < @first_index
+        offset_idx = (index - @first_index + 1).to_i32
+        new_size = if offset_idx < @offsets.size
+                     @offsets[offset_idx]
+                   else
+                     @file.size
+                   end
+        @file.truncate(new_size.to_i64)
+        @offsets = @offsets[0...offset_idx]
+        @count = offset_idx.to_u32
+        @last_index = index
+        @file.seek(new_size)
+      end
+
       def close
         @file.close
       end
