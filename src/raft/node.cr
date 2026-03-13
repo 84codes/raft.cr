@@ -545,7 +545,10 @@ module Raft
       entries_io = IO::Memory.new
       entries_count = 0_u32
       (next_idx..@log.last_index).each do |i|
-        @log.get(i).to_io(entries_io)
+        entry_io = IO::Memory.new
+        @log.get(i).to_io(entry_io)
+        break if entries_count > 0 && entries_io.pos + entry_io.pos > @config.max_append_entries_size
+        entries_io.write(entry_io.to_slice)
         entries_count += 1
       end
 

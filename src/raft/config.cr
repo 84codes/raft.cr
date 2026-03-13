@@ -9,6 +9,7 @@ module Raft
     property max_segment_size : UInt32 = 64_u32 * 1024_u32 * 1024_u32 # 64 MB
     property data_dir : String = "data"
     property snapshot_chunk_size : UInt32 = 1024_u32 * 1024_u32 # 1 MB
+    property max_append_entries_size : UInt32 = 1_u32 * 1024_u32 * 1024_u32 # 1 MB
 
     def initialize
     end
