@@ -306,7 +306,7 @@ module Raft
         others = reachable.reject { |n| n.address == first.address }
         others.each do |node|
           join_node_to_cluster(node, leader)
-          sleep 200.milliseconds
+          wait_for_commit(leader)
         end
       end
 
@@ -325,6 +325,10 @@ module Raft
       end
 
       private def join_node_to_cluster(node : NodeStatus, leader : NodeStatus)
+        if node.id == leader.id
+          add_event("Cannot join leader to itself (Node #{node.id})")
+          return
+        end
         # Register transport peers bidirectionally between new node and all cluster members
         cluster_members = @nodes.select { |n| n.reachable && n.address != node.address && !n.peers.empty? }
         cluster_members << leader unless cluster_members.any? { |n| n.address == leader.address }
@@ -340,14 +344,42 @@ module Raft
           client = ::HTTP::Client.new(uri)
           client.connect_timeout = 2.seconds
           client.read_timeout = 2.seconds
-          response = client.post("/raft/admin/add_server/#{node.id}")
+          body = {address: node.raft_address}.to_json
+          response = client.post("/raft/admin/add_server/#{node.id}", body: body, headers: ::HTTP::Headers{"Content-Type" => "application/json"})
           if response.status_code == 200
             add_event("Added Node #{node.id} to cluster via leader (Node #{leader.id})")
           else
-            add_event("Failed to add Node #{node.id}: #{response.status_code}")
+            error = begin
+              JSON.parse(response.body)["error"]?.try(&.as_s) || response.status_code.to_s
+            rescue
+              response.status_code.to_s
+            end
+            add_event("Failed to add Node #{node.id}: #{error}")
           end
         rescue ex
           add_event("Failed to add Node #{node.id}: #{ex.message}")
+        end
+      end
+
+      # Wait for leader's commit_index to advance (config change committed)
+      private def wait_for_commit(leader : NodeStatus, timeout : Time::Span = 3.seconds)
+        start_commit = leader.commit_index
+        deadline = Time.instant + timeout
+        while Time.instant < deadline
+          sleep 100.milliseconds
+          begin
+            uri = URI.parse(leader.address)
+            client = ::HTTP::Client.new(uri)
+            client.connect_timeout = 1.second
+            client.read_timeout = 1.second
+            response = client.get("/raft/status")
+            if response.status_code == 200
+              data = JSON.parse(response.body)
+              current_commit = data["commit_index"].as_i64.to_u64
+              return if current_commit > start_commit
+            end
+          rescue
+          end
         end
       end
 

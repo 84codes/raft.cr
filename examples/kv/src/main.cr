@@ -64,9 +64,19 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(KVCommand)) {
   metrics = Raft::Metrics.new(node_id: node_id, group_id: group_id)
   node = Raft::Node(KVCommand).new(
     id: node_id, peers: current_peer_ids, config: cfg,
-    state_machine: sm, metrics: metrics, group_id: group_id
+    state_machine: sm, metrics: metrics, group_id: group_id,
+    address: raft_advertise_address
   )
   nodes[group_id] = node
+  # Register transport peers from config entries (addresses propagate via Raft log)
+  node.on_configuration_applied do |peers|
+    peers.each do |p|
+      next if p.id == node_id || p.address.empty?
+      parts = p.address.split(":")
+      next if parts.size < 2
+      transport.register_peer(p.id, parts[0], parts[1].to_i)
+    end
+  end
   transport.register_channel(group_id, node.inbox)
   start_group_loop.call(node)
   Log.info { "Created Raft group #{group_id}" }

@@ -51,6 +51,11 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--log.level=warn"]
 
   grafana:
     image: grafana/grafana:latest
@@ -61,8 +66,13 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
       GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_LOG_LEVEL: "warn"
     ports:
       - "3000:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
 
 volumes:
   node1-data:
