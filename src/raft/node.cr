@@ -405,9 +405,12 @@ module Raft
       if msg.commit_index > @commit_index
         new_commit = Math.min(msg.commit_index, @log.last_index)
         apply_entries(@commit_index + 1, new_commit)
-        @commit_index = new_commit
-        @metrics.try(&.increment("raft_commit_advances_total"))
-        persist_state
+        # If we were removed and log was reset by apply_configuration, skip the update
+        unless @peers.empty? && @log.last_index == 0_u64
+          @commit_index = new_commit
+          @metrics.try(&.increment("raft_commit_advances_total"))
+          persist_state
+        end
       end
 
       @outbox << {msg.from, Message.new(
@@ -678,6 +681,14 @@ module Raft
 
     private def apply_configuration(entry : LogEntry(T))
       @pending_config_index = 0_u64
+      # If removal is now committed, clean up fully
+      if @peers.empty?
+        @voted_for = nil
+        @commit_index = 0_u64
+        @last_applied = 0_u64
+        @log.reset
+        persist_state
+      end
       @on_configuration_change.try(&.call(@peers))
     end
 
@@ -690,14 +701,12 @@ module Raft
       return if new_peers == @peers
 
       unless new_peers.any? { |p| p.id == @id }
-        # We've been removed from the cluster — go back to standalone
+        # Removed from cluster — step down but keep log intact.
+        # Entry is uncommitted; if leader fails, a new leader may roll it back.
+        # Full cleanup (log reset etc.) happens in apply_configuration at commit time.
         @peers = [] of Peer
         @role = Role::Follower
         @leader_id = nil
-        @voted_for = nil
-        @commit_index = 0_u64
-        @last_applied = 0_u64
-        @log.reset
         persist_state
         return
       end

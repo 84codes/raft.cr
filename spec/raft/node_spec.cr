@@ -857,7 +857,7 @@ describe Raft::Node do
       node.close
     end
 
-    it "removed node goes back to standalone" do
+    it "removed node steps down but keeps log until committed" do
       config = Raft::Config.new
       config.election_timeout_min_ticks = 5_u32
       config.election_timeout_max_ticks = 5_u32
@@ -871,28 +871,135 @@ describe Raft::Node do
       elect_leader(nodes)
       leader = nodes[1_u64]
 
+      # Deliver initial heartbeats so n3 has the no-op entry
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      # Remember n3's log size before removal
+      n3_log_before = nodes[3_u64].log.last_index
+      n3_log_before.should be > 0_u64
+
       # Remove node 3
       leader.remove_server(3_u64).should eq true
 
-      # Deliver AppendEntries (with config entry in log) to node 3
+      # Deliver AppendEntries (with config entry) to node 3 only — don't commit
       messages = leader.take_messages
       messages.each do |target_id, msg|
         nodes[target_id].step(msg) if target_id == 3_u64
       end
 
-      # Node 3 should be standalone now
+      # Node 3 should have stepped down but log should be intact
       nodes[3_u64].peers.should be_empty
       nodes[3_u64].role.should eq Raft::Role::Follower
-      nodes[3_u64].commit_index.should eq 0_u64
-      nodes[3_u64].log.last_index.should eq 0_u64
+      nodes[3_u64].log.last_index.should be >= n3_log_before
 
       # Drain any pending responses from the removal notification
       nodes[3_u64].take_messages
 
-      # Node 3 should not start elections
+      # Node 3 should not start elections (no peers)
       10.times { nodes[3_u64].tick }
       nodes[3_u64].role.should eq Raft::Role::Follower
       nodes[3_u64].take_messages.should be_empty
+
+      nodes.each_value(&.close)
+    end
+
+    it "removed node log is destroyed only when removal is committed" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+      elect_leader(nodes)
+      leader = nodes[1_u64]
+
+      # Deliver initial heartbeats so all nodes have the no-op entry
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      # Propose some data so n3 has entries in its log
+      leader.propose(TestData.new("data1"))
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          leader.step(msg) if target_id == 1_u64
+        end
+      end
+
+      n3_log_before = nodes[3_u64].log.last_index
+      n3_log_before.should be > 0_u64
+
+      # Remove node 3
+      leader.remove_server(3_u64).should eq true
+
+      # Deliver config entry to all nodes (including n3)
+      messages = leader.take_messages
+      messages.each do |target_id, msg|
+        nodes[target_id].step(msg)
+      end
+
+      # n3 stepped down but log is intact (uncommitted removal)
+      nodes[3_u64].peers.should be_empty
+      nodes[3_u64].role.should eq Raft::Role::Follower
+      nodes[3_u64].log.last_index.should be >= n3_log_before
+
+      # Now commit: deliver n2's response to leader, which advances commit_index
+      nodes[2_u64].take_messages.each do |target_id, msg|
+        leader.step(msg) if target_id == 1_u64
+      end
+
+      # Leader should have committed the config entry now
+      leader.commit_index.should be > n3_log_before
+
+      # Send another AppendEntries from leader to n3 with updated commit_index
+      # This triggers the commit-time apply_configuration on n3
+      100.times { leader.tick } # trigger heartbeat
+      messages = leader.take_messages
+      # Leader no longer knows about n3 (removed from peers), so we craft the message
+      # Actually, the leader already removed n3 from its peer list when remove_server was called.
+      # n3 needs to receive an AppendEntries with commit_index covering the config entry.
+      # Since leader won't send to n3 anymore, we simulate the commit advancing on n3
+      # by having n3 receive a message with a higher commit_index.
+      # Drain n3's pending messages
+      nodes[3_u64].take_messages
+
+      # Simulate n3 receiving a heartbeat that tells it to commit up to the config entry
+      config_entry_index = nodes[3_u64].log.last_index
+      commit_msg = Raft::Message.new(
+        type: Raft::MessageType::AppendEntries,
+        from: 1_u64,
+        term: leader.current_term,
+        prev_log_index: config_entry_index,
+        prev_log_term: leader.current_term,
+        commit_index: config_entry_index,
+      )
+      nodes[3_u64].step(commit_msg)
+
+      # Now the removal is committed — log should be reset
+      nodes[3_u64].log.last_index.should eq 0_u64
+      nodes[3_u64].commit_index.should eq 0_u64
 
       nodes.each_value(&.close)
     end
