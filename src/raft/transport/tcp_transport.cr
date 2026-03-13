@@ -36,8 +36,9 @@ module Raft
       getter id : NodeID
       getter host : String
       getter port : Int32
+      getter ack : Channel(Nil)?
 
-      def initialize(@id, @host, @port)
+      def initialize(@id, @host, @port, @ack = nil)
       end
     end
 
@@ -47,7 +48,9 @@ module Raft
 
     def register_peer(id : NodeID, host : String, port : Int32)
       if @running
-        @commands.send(RegisterPeerCommand.new(id, host, port))
+        ack = Channel(Nil).new(1)
+        @commands.send(RegisterPeerCommand.new(id, host, port, ack))
+        ack.receive # Wait for dispatcher to process
       else
         @peers[id] = {host, port}
         persist_peers
@@ -105,11 +108,15 @@ module Raft
 
     def send(to : NodeID, message : Message)
       conn = get_connection(to)
-      return unless conn
+      unless conn
+        ::Log.warn { "Transport: no connection to node #{to} (peer known: #{@peers.has_key?(to)})" }
+        return
+      end
       begin
         message.to_io(conn)
         conn.flush
       rescue ex : IO::Error
+        ::Log.warn { "Transport: send to node #{to} failed: #{ex.message}" }
         @connections.delete(to)
         conn.close rescue nil
       end
@@ -136,6 +143,7 @@ module Raft
       when RegisterPeerCommand
         @peers[cmd.id] = {cmd.host, cmd.port}
         persist_peers
+        cmd.ack.try(&.send(nil))
       end
     end
 
@@ -187,8 +195,10 @@ module Raft
           select
           when ch.send(msg)
           else
-            # Group inbox full, drop — Raft retries naturally
+            ::Log.warn { "Transport: inbox full for group #{msg.group_id}, dropping #{msg.type} from #{msg.from}" }
           end
+        else
+          ::Log.warn { "Transport: no channel for group #{msg.group_id}, dropping #{msg.type} from #{msg.from}" }
         end
       end
     rescue IO::EOFError | IO::Error

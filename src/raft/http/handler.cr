@@ -50,6 +50,7 @@ module Raft
                   j.object do
                     j.field "id", p.id
                     j.field "role", p.role.to_s.downcase
+                    j.field "address", p.address unless p.address.empty?
                   end
                 end
               end
@@ -129,7 +130,14 @@ module Raft
         else
           if path.starts_with?("/raft/admin/add_server/")
             node_id = path.split("/").last.to_u64
-            if @node.add_server(node_id)
+            address = ""
+            if body = context.request.body.try(&.gets_to_end)
+              if !body.empty?
+                data = JSON.parse(body)
+                address = data["address"]?.try(&.as_s) || ""
+              end
+            end
+            if @node.add_server(node_id, address)
               json_response(context, 200, {"status" => "added", "node_id" => node_id.to_s})
             else
               json_response(context, 400, {"error" => "failed to add server"})

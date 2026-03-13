@@ -16,6 +16,7 @@ module Raft
       getter partitioned : Bool = false
     {% end %}
     getter group_id : UInt64
+    getter address : String = ""
     getter inbox : Channel(Message) = Channel(Message).new(64)
     @config : Config
     @state_machine : StateMachine(T)
@@ -30,9 +31,10 @@ module Raft
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @on_configuration_change : Proc(Array(Peer), Nil)?
+    @on_configuration_applied : Proc(Array(Peer), Nil)?
     @pending_config_index : UInt64 = 0_u64
 
-    def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64)
+    def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64, @address : String = "")
       if peers.empty?
         @peers = [] of Peer
       else
@@ -97,6 +99,7 @@ module Raft
         @heartbeat_tick += 1
         if @heartbeat_tick >= @config.heartbeat_ticks
           @heartbeat_tick = 0_u32
+          advance_commit_index
           send_append_entries
         end
       end
@@ -108,7 +111,10 @@ module Raft
         return if @partitioned
       {% end %}
 
-      return if message.group_id != @group_id
+      if message.group_id != @group_id
+        ::Log.warn { "Node #{@id}/g#{@group_id}: dropping message with group_id #{message.group_id} (#{message.type} from #{message.from})" }
+        return
+      end
 
       # PreVote messages don't cause term changes — they're speculative
       unless message.type == MessageType::PreVote || message.type == MessageType::PreVoteResponse
@@ -142,6 +148,7 @@ module Raft
       return false unless @role == Role::Leader
       @log.append(term: @current_term, data: data, entry_type: EntryType::Normal)
       @metrics.try(&.increment("raft_proposals_total"))
+      advance_commit_index
       send_append_entries
       true
     end
@@ -161,7 +168,7 @@ module Raft
     # Only works when the node has no peers (fresh start).
     def bootstrap : Bool
       return false unless @peers.empty?
-      @peers = [Peer.new(@id)]
+      @peers = [Peer.new(@id, address: @address)]
       @current_term = 1_u64
       @role = Role::Leader
       @leader_id = @id
@@ -174,12 +181,12 @@ module Raft
 
     # Add a new node to the cluster as a learner.
     # Returns false if not leader or node already exists.
-    def add_server(node_id : NodeID) : Bool
+    def add_server(node_id : NodeID, address : String = "") : Bool
       return false unless @role == Role::Leader
       return false if @pending_config_index > @commit_index
       return false if @peers.any? { |p| p.id == node_id }
       new_peers = @peers.dup
-      new_peers << Peer.new(node_id, Peer::Role::Learner)
+      new_peers << Peer.new(node_id, Peer::Role::Learner, address)
       append_configuration(new_peers)
       true
     end
@@ -206,7 +213,7 @@ module Raft
       return false unless @peers.any? { |p| p.id == node_id && p.learner? }
       new_peers = @peers.map do |p|
         if p.id == node_id
-          Peer.new(p.id, Peer::Role::Voter)
+          Peer.new(p.id, Peer::Role::Voter, p.address)
         else
           p
         end
@@ -232,6 +239,13 @@ module Raft
 
     def on_configuration_change(&block : Array(Peer) ->)
       @on_configuration_change = block
+    end
+
+    # Called whenever the peer list changes — both when config entries are stored
+    # in the log (followers) and when they're committed (leader). Use this to
+    # register transport peer addresses from config entries.
+    def on_configuration_applied(&block : Array(Peer) ->)
+      @on_configuration_applied = block
     end
 
     def close
@@ -326,6 +340,7 @@ module Raft
       end
       # Append no-op to force log convergence — truncates stale entries on followers
       @log.append(term: @current_term, entry_type: EntryType::Noop)
+      advance_commit_index
       send_append_entries
     end
 
@@ -394,10 +409,10 @@ module Raft
             @log.append(term: entry.term, data: entry.data, entry_type: entry.entry_type, config_data: entry.config_data)
           end
           # Per Raft paper: apply configuration immediately when stored in log,
-          # regardless of commit status. This ensures removed nodes learn promptly.
+          # regardless of whether the entry is committed. Process all entries in the
+          # batch — a later entry may re-add this node after an earlier one removed it.
           if entry.entry_type == EntryType::Configuration
             apply_configuration_from_entry(entry)
-            return if @peers.empty? # we were removed, stop processing
           end
         end
         @metrics.try(&.increment("raft_log_entries_received_total", by: msg.entries_count.to_i64))
@@ -660,6 +675,9 @@ module Raft
         end
       end
 
+      # Try to commit immediately (single-voter leader can commit without followers)
+      advance_commit_index
+
       # Send to union of old and new peers so both removed and added nodes
       # receive the config entry
       all_peer_ids = Set(NodeID).new
@@ -673,6 +691,7 @@ module Raft
       # Switch to new configuration
       @peers = new_peers
       persist_state
+      @on_configuration_applied.try(&.call(@peers))
 
       # Clean up tracking for removed peers
       removed.each do |p|
@@ -703,18 +722,23 @@ module Raft
       return if new_peers == @peers
 
       unless new_peers.any? { |p| p.id == @id }
-        # Removed from cluster — step down but keep log intact.
-        # Entry is uncommitted; if leader fails, a new leader may roll it back.
-        # Full cleanup (log reset etc.) happens in apply_configuration at commit time.
-        @peers = [] of Peer
-        @role = Role::Follower
-        @leader_id = nil
-        persist_state
+        if @peers.any?
+          # Was a member, now removed — step down but keep log intact.
+          # Entry is uncommitted; if leader fails, a new leader may roll it back.
+          # Full cleanup (log reset etc.) happens in apply_configuration at commit time.
+          @peers = [] of Peer
+          @role = Role::Follower
+          @leader_id = nil
+          persist_state
+        end
+        # If we were standalone (empty peers), skip — we were never a member.
+        # A later config entry in this batch may add us.
         return
       end
 
       @peers = new_peers
       persist_state
+      @on_configuration_applied.try(&.call(@peers))
     end
 
     private def random_election_timeout : UInt32
