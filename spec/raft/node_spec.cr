@@ -1403,4 +1403,21 @@ describe Raft::Node do
       nodes.each_value(&.close)
     end
   end
+
+  describe "group_id validation" do
+    it "ignores messages with wrong group_id" do
+      node = create_test_node(1_u64, [2_u64, 3_u64])
+
+      wrong_group_msg = Raft::Message.new(
+        type: Raft::MessageType::RequestVote,
+        from: 99_u64,
+        term: 100_u64,
+        group_id: 999_u64,
+      )
+      node.step(wrong_group_msg)
+      node.current_term.should eq(0_u64) # term unchanged
+
+      node.close
+    end
+  end
 end

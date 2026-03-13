@@ -108,6 +108,8 @@ module Raft
         return if @partitioned
       {% end %}
 
+      return if message.group_id != @group_id
+
       # PreVote messages don't cause term changes — they're speculative
       unless message.type == MessageType::PreVote || message.type == MessageType::PreVoteResponse
         if message.term > @current_term
