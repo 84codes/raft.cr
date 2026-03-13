@@ -6,6 +6,7 @@ module Raft
     getter voted_for : NodeID? = nil
     getter leader_id : NodeID? = nil
     getter commit_index : UInt64 = 0_u64
+    getter last_applied : UInt64 = 0_u64
     getter log : Log(T)
 
     getter peers : Array(Peer)
@@ -65,6 +66,7 @@ module Raft
         @voted_for = nil
         @leader_id = nil
         @commit_index = 0_u64
+        @last_applied = 0_u64
         @election_tick = 0_u32
         @heartbeat_tick = 0_u32
         @election_timeout = random_election_timeout
@@ -462,14 +464,19 @@ module Raft
     end
 
     private def apply_entries(from : UInt64, to : UInt64)
-      (from..to).each do |i|
+      start = Math.max(from, @last_applied + 1)
+      (start..to).each do |i|
         entry = @log.get(i)
         if entry.entry_type == EntryType::Configuration
           apply_configuration(entry)
+          @last_applied = i
           break if @peers.empty? # removed from cluster
         elsif data = entry.data
           @state_machine.apply(data)
           @metrics.try(&.increment("raft_entries_applied_total"))
+          @last_applied = i
+        else
+          @last_applied = i
         end
       end
     end
@@ -686,6 +693,7 @@ module Raft
         @leader_id = nil
         @voted_for = nil
         @commit_index = 0_u64
+        @last_applied = 0_u64
         @log.reset
         persist_state
         return
@@ -710,7 +718,6 @@ module Raft
         else
           f.write_bytes(0_u8, IO::ByteFormat::LittleEndian)
         end
-        f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
         f.write_bytes(@peers.size.to_u32, IO::ByteFormat::LittleEndian)
         @peers.each { |p| p.to_io(f) }
         f.fsync
@@ -728,7 +735,6 @@ module Raft
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
-        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
         @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
       end
