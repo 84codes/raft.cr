@@ -502,6 +502,141 @@ describe Raft::Node do
     end
   end
 
+  describe "atomic persist_state" do
+    it "does not leave a .tmp file after persist_state" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+
+      dir = File.tempname("raft_atomic")
+      Dir.mkdir_p(dir)
+
+      c = Raft::Config.new
+      c.data_dir = dir
+      c.election_timeout_min_ticks = 5_u32
+      c.election_timeout_max_ticks = 5_u32
+
+      sm = TestStateMachine.new
+      node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c, state_machine: sm)
+
+      # Trigger state change to force persist_state (election timeout -> PreVote -> become_candidate)
+      5.times { node.tick }
+      pre_votes = node.take_messages
+      pre_votes.each do |_, msg|
+        response = Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: msg.type == Raft::MessageType::PreVote ? 2_u64 : 3_u64,
+          term: 1_u64,
+          success: true,
+        )
+        node.step(response)
+      end
+
+      # No .tmp file should remain
+      File.exists?(File.join(dir, "raft_meta.tmp")).should eq false
+      # The main file should exist
+      File.exists?(File.join(dir, "raft_meta")).should eq true
+
+      node.close
+      FileUtils.rm_rf(dir)
+    end
+
+    it "recovers valid state after atomic persist" do
+      dir = File.tempname("raft_atomic_recover")
+      Dir.mkdir_p(dir)
+
+      c1 = Raft::Config.new
+      c1.data_dir = dir
+      c1.election_timeout_min_ticks = 5_u32
+      c1.election_timeout_max_ticks = 5_u32
+
+      sm = TestStateMachine.new
+      node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1, state_machine: sm)
+
+      # Trigger become_candidate to persist term=1, voted_for=1
+      5.times { node.tick }
+      pre_votes = node.take_messages
+      pre_votes.each do |_, msg|
+        response = Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: msg.type == Raft::MessageType::PreVote ? 2_u64 : 3_u64,
+          term: 1_u64,
+          success: true,
+        )
+        node.step(response)
+      end
+
+      node.current_term.should eq 1_u64
+      node.voted_for.should eq 1_u64
+      node.close
+
+      # Recover and verify
+      c2 = Raft::Config.new
+      c2.data_dir = dir
+      c2.election_timeout_min_ticks = 5_u32
+      c2.election_timeout_max_ticks = 5_u32
+
+      sm2 = TestStateMachine.new
+      node2 = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c2, state_machine: sm2)
+      node2.current_term.should eq 1_u64
+      node2.voted_for.should eq 1_u64
+
+      node2.close
+      FileUtils.rm_rf(dir)
+    end
+
+    it "cleans up leftover .tmp file on recovery" do
+      dir = File.tempname("raft_atomic_cleanup")
+      Dir.mkdir_p(dir)
+
+      # Create a valid raft_meta file first
+      c1 = Raft::Config.new
+      c1.data_dir = dir
+      c1.election_timeout_min_ticks = 5_u32
+      c1.election_timeout_max_ticks = 5_u32
+
+      sm = TestStateMachine.new
+      node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c1, state_machine: sm)
+
+      # Trigger persist
+      5.times { node.tick }
+      pre_votes = node.take_messages
+      pre_votes.each do |_, msg|
+        response = Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: msg.type == Raft::MessageType::PreVote ? 2_u64 : 3_u64,
+          term: 1_u64,
+          success: true,
+        )
+        node.step(response)
+      end
+      node.close
+
+      # Simulate a crash that left a .tmp file behind
+      tmp_path = File.join(dir, "raft_meta.tmp")
+      File.write(tmp_path, "garbage data simulating incomplete write")
+      File.exists?(tmp_path).should eq true
+
+      # Recovery should clean up the .tmp file
+      c2 = Raft::Config.new
+      c2.data_dir = dir
+      c2.election_timeout_min_ticks = 5_u32
+      c2.election_timeout_max_ticks = 5_u32
+
+      sm2 = TestStateMachine.new
+      node2 = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: c2, state_machine: sm2)
+
+      # .tmp file should be gone
+      File.exists?(tmp_path).should eq false
+      # State should be recovered from the valid raft_meta
+      node2.current_term.should eq 1_u64
+      node2.voted_for.should eq 1_u64
+
+      node2.close
+      FileUtils.rm_rf(dir)
+    end
+  end
+
   describe "membership changes" do
     it "add_server adds a learner" do
       config = Raft::Config.new

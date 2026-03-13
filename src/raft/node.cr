@@ -701,7 +701,8 @@ module Raft
 
     private def persist_state
       path = File.join(@config.data_dir, "raft_meta")
-      File.open(path, "wb") do |f|
+      tmp_path = path + ".tmp"
+      File.open(tmp_path, "wb") do |f|
         f.write_bytes(@current_term, IO::ByteFormat::LittleEndian)
         if vf = @voted_for
           f.write_bytes(1_u8, IO::ByteFormat::LittleEndian)
@@ -712,21 +713,24 @@ module Raft
         f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
         f.write_bytes(@peers.size.to_u32, IO::ByteFormat::LittleEndian)
         @peers.each { |p| p.to_io(f) }
+        f.fsync
       end
+      File.rename(tmp_path, path)
     end
 
     private def recover_state
       path = File.join(@config.data_dir, "raft_meta")
+      tmp_path = path + ".tmp"
+      # Clean up leftover temp file from a crash during persist_state
+      File.delete(tmp_path) if File.exists?(tmp_path)
       return unless File.exists?(path)
       File.open(path, "rb") do |f|
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
-        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) rescue 0_u64
-        # Recover peers — handle old files without it
-        if (peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian) rescue nil)
-          @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
-        end
+        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
       end
     end
 
