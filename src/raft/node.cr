@@ -111,8 +111,8 @@ module Raft
         if message.term > @current_term
           @metrics.try(&.increment("raft_term_changes_total", {"reason" => "higher_term"}))
           @current_term = message.term
+          @voted_for = nil
           become_follower(message.from)
-          persist_state
         end
       end
 
@@ -304,7 +304,6 @@ module Raft
       old_role = @role
       @role = Role::Follower
       @leader_id = leader
-      @voted_for = nil
       @election_tick = 0_u32
       @election_timeout = random_election_timeout
       @transfer_target = nil

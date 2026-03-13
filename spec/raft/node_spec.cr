@@ -347,6 +347,100 @@ describe Raft::Node do
     end
   {% end %}
 
+  describe "split-brain safety" do
+    it "does not clear voted_for when candidate steps down to follower in same term" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+
+      # Trigger election timeout on node 1 to get PreVote messages
+      5.times { nodes[1_u64].tick }
+      pre_votes = nodes[1_u64].take_messages
+
+      # Deliver PreVote responses to trigger become_candidate
+      pre_votes.each do |target_id, msg|
+        nodes[target_id].step(msg)
+      end
+      [2_u64, 3_u64].each do |id|
+        nodes[id].take_messages.each do |target_id, msg|
+          nodes[target_id].step(msg) if msg.type == Raft::MessageType::PreVoteResponse
+        end
+      end
+
+      # Node 1 should now be a Candidate in term 1, having voted for itself
+      nodes[1_u64].role.should eq Raft::Role::Candidate
+      candidate_term = nodes[1_u64].current_term
+      candidate_term.should eq 1_u64
+      nodes[1_u64].voted_for.should eq 1_u64
+
+      # Clear any pending RequestVote messages
+      nodes[1_u64].take_messages
+
+      # Simulate: node 2 won the election and sends AppendEntries in the SAME term
+      ae_msg = Raft::Message.new(
+        type: Raft::MessageType::AppendEntries,
+        from: 2_u64,
+        term: candidate_term,
+        prev_log_index: 0_u64,
+        prev_log_term: 0_u64,
+        commit_index: 0_u64,
+      )
+      nodes[1_u64].step(ae_msg)
+
+      # Node 1 should step down to follower
+      nodes[1_u64].role.should eq Raft::Role::Follower
+      nodes[1_u64].leader_id.should eq 2_u64
+      # voted_for must NOT be cleared — it already voted for itself this term
+      nodes[1_u64].voted_for.should eq 1_u64
+      nodes[1_u64].current_term.should eq candidate_term
+
+      nodes.each_value(&.close)
+    end
+
+    it "clears voted_for when stepping down due to higher term" do
+      config = Raft::Config.new
+      config.election_timeout_min_ticks = 5_u32
+      config.election_timeout_max_ticks = 5_u32
+      config.heartbeat_ticks = 100_u32
+
+      nodes = {
+        1_u64 => create_test_node(1_u64, [2_u64, 3_u64], config),
+        2_u64 => create_test_node(2_u64, [1_u64, 3_u64], config),
+        3_u64 => create_test_node(3_u64, [1_u64, 2_u64], config),
+      }
+
+      # Elect node 1 as leader in term 1
+      elect_leader(nodes)
+      nodes[1_u64].role.should eq Raft::Role::Leader
+      nodes[1_u64].voted_for.should eq 1_u64
+
+      # Node 2 sends AppendEntries with a HIGHER term
+      ae_msg = Raft::Message.new(
+        type: Raft::MessageType::AppendEntries,
+        from: 2_u64,
+        term: 5_u64,
+        prev_log_index: 0_u64,
+        prev_log_term: 0_u64,
+        commit_index: 0_u64,
+      )
+      nodes[1_u64].step(ae_msg)
+
+      # Node 1 should step down and clear voted_for (new term)
+      nodes[1_u64].role.should eq Raft::Role::Follower
+      nodes[1_u64].current_term.should eq 5_u64
+      nodes[1_u64].voted_for.should be_nil
+
+      nodes.each_value(&.close)
+    end
+  end
+
   describe "peers" do
     it "exposes peer list including self" do
       node = create_test_node(1_u64, [2_u64, 3_u64])
