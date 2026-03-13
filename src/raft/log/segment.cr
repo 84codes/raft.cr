@@ -75,18 +75,27 @@ module Raft
         @offsets.clear
         @count = 0_u32
         @last_index = @first_index - 1
+        valid_end = 0_i64
 
         while @file.pos < file_size
           offset = @file.pos.to_u64
-          @offsets << offset
-          entry = LogEntry(T).from_io(@file)
-          @last_index = entry.index
-          @count += 1
+          begin
+            entry = LogEntry(T).from_io(@file)
+            @offsets << offset
+            @last_index = entry.index
+            @count += 1
+            valid_end = @file.pos.to_i64
+          rescue ex
+            # Partial entry — truncate file to last valid position
+            ::Log.warn { "Truncating partial entry at offset #{offset} in segment starting at index #{@first_index}: #{ex.message}" }
+            break
+          end
         end
 
-        # Set size to actual valid data (matters if process crashed —
+        # Resize to actual valid data (matters if process crashed —
         # file may be capacity-sized with garbage at the tail)
-        @file.resize(@file.pos)
+        @file.resize(valid_end)
+        @file.seek(valid_end)
       end
 
       private def segment_filename : String

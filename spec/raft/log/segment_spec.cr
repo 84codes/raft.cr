@@ -123,6 +123,53 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
+  it "recovers partial entry by truncating garbage at end of segment" do
+    dir = File.tempname("raft_segment")
+    Dir.mkdir_p(dir)
+
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
+    entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
+    segment.append(entry1)
+    segment.append(entry2)
+    segment.close
+
+    # Append garbage bytes to simulate a crash mid-write
+    path = File.join(dir, "%016d.log" % 1)
+    File.open(path, "a") { |f| f.write(Bytes.new(17, 0xDE_u8)) }
+
+    # Reopen — recover should ignore the garbage and see only valid entries
+    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    segment2.count.should eq 2
+    segment2.last_index.should eq 2_u64
+    segment2.read(1_u64).data.not_nil!.value.should eq "first"
+    segment2.read(2_u64).data.not_nil!.value.should eq "second"
+    segment2.close
+
+    FileUtils.rm_rf(dir)
+  end
+
+  it "recovers empty segment with only garbage bytes" do
+    dir = File.tempname("raft_segment")
+    Dir.mkdir_p(dir)
+
+    # Create a segment so the file exists, then close it
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment.close
+
+    # Write garbage to the empty segment file
+    path = File.join(dir, "%016d.log" % 1)
+    File.open(path, "a") { |f| f.write(Bytes.new(11, 0xAB_u8)) }
+
+    # Reopen — should recover with zero valid entries
+    segment2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    segment2.count.should eq 0
+    segment2.last_index.should eq 0_u64
+    segment2.close
+
+    FileUtils.rm_rf(dir)
+  end
+
   it "reopens and reads existing segment" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
