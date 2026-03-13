@@ -7,26 +7,67 @@ module Raft
     @peers : Hash(NodeID, {String, Int32}) = {} of NodeID => {String, Int32}
     @connections : Hash(NodeID, TCPSocket) = {} of NodeID => TCPSocket
     @channels : Hash(UInt64, Channel(Message)) = {} of UInt64 => Channel(Message)
+    @peer_outboxes : Hash(NodeID, Channel(Message)) = {} of NodeID => Channel(Message)
     @server : TCPServer? = nil
     @running : Bool = false
     @data_dir : String?
     getter outbox : Channel({NodeID, Message}) = Channel({NodeID, Message}).new(256)
+    @commands : Channel(TransportCommand) = Channel(TransportCommand).new(64)
+
+    private abstract struct TransportCommand
+    end
+
+    private struct RegisterChannelCommand < TransportCommand
+      getter group_id : UInt64
+      getter channel : Channel(Message)
+
+      def initialize(@group_id, @channel)
+      end
+    end
+
+    private struct UnregisterChannelCommand < TransportCommand
+      getter group_id : UInt64
+
+      def initialize(@group_id)
+      end
+    end
+
+    private struct RegisterPeerCommand < TransportCommand
+      getter id : NodeID
+      getter host : String
+      getter port : Int32
+
+      def initialize(@id, @host, @port)
+      end
+    end
 
     def initialize(@listen_address : String, @listen_port : Int32, @data_dir : String? = nil)
       recover_peers
     end
 
     def register_peer(id : NodeID, host : String, port : Int32)
-      @peers[id] = {host, port}
-      persist_peers
+      if @running
+        @commands.send(RegisterPeerCommand.new(id, host, port))
+      else
+        @peers[id] = {host, port}
+        persist_peers
+      end
     end
 
     def register_channel(group_id : UInt64, channel : Channel(Message))
-      @channels[group_id] = channel
+      if @running
+        @commands.send(RegisterChannelCommand.new(group_id, channel))
+      else
+        @channels[group_id] = channel
+      end
     end
 
     def unregister_channel(group_id : UInt64)
-      @channels.delete(group_id)
+      if @running
+        @commands.send(UnregisterChannelCommand.new(group_id))
+      else
+        @channels.delete(group_id)
+      end
     end
 
     def start
@@ -42,17 +83,20 @@ module Raft
           end
         end
       end
-      spawn(name: "raft-transport-write") do
-        while @running
-          target_id, msg = @outbox.receive
-          send(to: target_id, message: msg)
-        end
+      spawn(name: "raft-transport-dispatch") do
+        run_dispatcher
       end
     end
 
     def stop
       @running = false
       @server.try(&.close)
+      @commands.close
+      @outbox.close
+      @peer_outboxes.each_value do |ch|
+        ch.close
+      end
+      @peer_outboxes.clear
       @connections.each_value do |conn|
         conn.close rescue nil
       end
@@ -68,6 +112,54 @@ module Raft
       rescue ex : IO::Error
         @connections.delete(to)
         conn.close rescue nil
+      end
+    end
+
+    private def run_dispatcher
+      while @running
+        select
+        when cmd = @commands.receive
+          process_command(cmd)
+        when item = @outbox.receive
+          route_to_peer(item[0], item[1])
+        end
+      end
+    rescue Channel::ClosedError
+    end
+
+    private def process_command(cmd : TransportCommand)
+      case cmd
+      when RegisterChannelCommand
+        @channels[cmd.group_id] = cmd.channel
+      when UnregisterChannelCommand
+        @channels.delete(cmd.group_id)
+      when RegisterPeerCommand
+        @peers[cmd.id] = {cmd.host, cmd.port}
+        persist_peers
+      end
+    end
+
+    private def route_to_peer(target_id : NodeID, msg : Message)
+      ensure_peer_fiber(target_id)
+      if ch = @peer_outboxes[target_id]?
+        select
+        when ch.send(msg)
+        else
+          # Per-peer queue full, drop — Raft retries naturally
+        end
+      end
+    end
+
+    private def ensure_peer_fiber(peer_id : NodeID)
+      return if @peer_outboxes.has_key?(peer_id)
+      ch = Channel(Message).new(64)
+      @peer_outboxes[peer_id] = ch
+      spawn(name: "raft-transport-peer-#{peer_id}") do
+        while @running
+          msg = ch.receive
+          send(to: peer_id, message: msg)
+        end
+      rescue Channel::ClosedError
       end
     end
 
@@ -92,7 +184,11 @@ module Raft
       while @running
         msg = Message.from_io(client)
         if ch = @channels[msg.group_id]?
-          ch.send(msg)
+          select
+          when ch.send(msg)
+          else
+            # Group inbox full, drop — Raft retries naturally
+          end
         end
       end
     rescue IO::EOFError | IO::Error
