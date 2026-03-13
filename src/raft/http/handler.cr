@@ -97,6 +97,12 @@ module Raft
       end
 
       private def handle_admin(context, path)
+        handle_admin_inner(context, path)
+      rescue ex : JSON::ParseException | KeyError | ArgumentError
+        json_response(context, 400, {"error" => "invalid request: #{ex.message}"})
+      end
+
+      private def handle_admin_inner(context, path)
         case path
         when "/raft/admin/bootstrap"
           if @node.bootstrap
