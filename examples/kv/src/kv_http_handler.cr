@@ -310,18 +310,18 @@ class KVHttpHandler
   end
 
   private def handle_put(context, key)
-    value = context.request.body.try(&.gets_to_end) || ""
-    wait = context.request.query_params.has_key?("wait")
-
     if group_id = @meta_sm.group_for(key)
       # Group exists — propose value to data group
       if node = @nodes[group_id]?
         unless node.role == Raft::Role::Leader
+          return if forward_to_leader(context, node)
           context.response.status_code = 503
           context.response.content_type = "application/json"
           context.response.print({error: "not leader for key", leader_id: node.leader_id}.to_json)
           return
         end
+        value = context.request.body.try(&.gets_to_end) || ""
+        wait = context.request.query_params.has_key?("wait")
         node.propose(KVCommand.new(KVAction::Put, key, value))
         context.response.content_type = "application/json"
         if wait
@@ -334,11 +334,14 @@ class KVHttpHandler
     else
       # Group doesn't exist — create it with initial value via meta consensus
       unless @meta_node.role == Raft::Role::Leader
+        return if forward_to_leader(context, @meta_node)
         context.response.status_code = 503
         context.response.content_type = "application/json"
         context.response.print({error: "not meta leader", leader_id: @meta_node.leader_id}.to_json)
         return
       end
+      value = context.request.body.try(&.gets_to_end) || ""
+      wait = context.request.query_params.has_key?("wait")
       @meta_node.propose(KVCommand.new(KVAction::CreateGroup, key, value))
       context.response.content_type = "application/json"
       if wait
@@ -358,6 +361,7 @@ class KVHttpHandler
       return
     end
     unless @meta_node.role == Raft::Role::Leader
+      return if forward_to_leader(context, @meta_node)
       context.response.status_code = 503
       context.response.content_type = "application/json"
       context.response.print({error: "not meta leader", leader_id: @meta_node.leader_id}.to_json)
@@ -367,6 +371,34 @@ class KVHttpHandler
     context.response.status_code = 202
     context.response.content_type = "application/json"
     context.response.print({status: "accepted", key: key}.to_json)
+  end
+
+  # Forward an HTTP request to the leader node.
+  # Derives the leader's HTTP address from its raft address (same host, port 8000 + node_id).
+  # Returns true if forwarded, false if leader unknown.
+  private def forward_to_leader(context, node : Raft::Node(KVCommand)) : Bool
+    leader_id = node.leader_id
+    return false unless leader_id
+    peer = node.peers.find { |p| p.id == leader_id }
+    return false unless peer && !peer.address.empty?
+    host = peer.address.split(":").first
+    http_port = 8000 + leader_id
+    begin
+      client = ::HTTP::Client.new(host, http_port.to_i)
+      client.connect_timeout = 2.seconds
+      client.read_timeout = 5.seconds
+      body = context.request.body.try(&.gets_to_end)
+      query = context.request.query
+      resource = query ? "#{context.request.path}?#{query}" : context.request.path
+      response = client.exec(context.request.method, resource, context.request.headers, body)
+      context.response.status_code = response.status_code
+      context.response.content_type = response.content_type || "application/json"
+      context.response.print response.body
+      true
+    rescue ex
+      Log.warn { "Forward to leader #{leader_id} failed: #{ex.message}" }
+      false
+    end
   end
 
   {% if flag?(:raft_debug) %}
