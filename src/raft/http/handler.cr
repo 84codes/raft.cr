@@ -91,6 +91,7 @@ module Raft
           context.response.content_type = "text/plain; version=0.0.4"
           context.response.status_code = 200
           context.response.print metrics.to_prometheus
+          @transport.try(&.to_prometheus(context.response))
         else
           context.response.status_code = 503
           context.response.print "Metrics not configured"

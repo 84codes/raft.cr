@@ -13,6 +13,8 @@ module Raft
     @data_dir : String?
     getter outbox : Channel({NodeID, Message}) = Channel({NodeID, Message}).new(256)
     @commands : Channel(TransportCommand) = Channel(TransportCommand).new(64)
+    @outbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
+    @inbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
 
     private abstract struct TransportCommand
     end
@@ -154,6 +156,7 @@ module Raft
         when ch.send(msg)
         else
           # Per-peer queue full, drop — Raft retries naturally
+          @outbox_drops[target_id] += 1
         end
       end
     end
@@ -195,6 +198,7 @@ module Raft
           select
           when ch.send(msg)
           else
+            @inbox_drops[msg.from] += 1
             ::Log.warn { "Transport: inbox full for group #{msg.group_id}, dropping #{msg.type} from #{msg.from}" }
           end
         else
@@ -203,6 +207,19 @@ module Raft
       end
     rescue IO::EOFError | IO::Error
       client.close rescue nil
+    end
+
+    def to_prometheus(io : IO)
+      io << "# HELP raft_transport_outbox_drops_total Messages dropped due to full per-peer outbox\n"
+      io << "# TYPE raft_transport_outbox_drops_total counter\n"
+      @outbox_drops.each do |peer_id, count|
+        io << "raft_transport_outbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+      end
+      io << "# HELP raft_transport_inbox_drops_total Messages dropped due to full group inbox\n"
+      io << "# TYPE raft_transport_inbox_drops_total counter\n"
+      @inbox_drops.each do |peer_id, count|
+        io << "raft_transport_inbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+      end
     end
 
     private def persist_peers
