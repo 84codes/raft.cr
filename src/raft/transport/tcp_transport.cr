@@ -38,9 +38,8 @@ module Raft
       getter id : NodeID
       getter host : String
       getter port : Int32
-      getter ack : Channel(Nil)?
 
-      def initialize(@id, @host, @port, @ack = nil)
+      def initialize(@id, @host, @port)
       end
     end
 
@@ -49,30 +48,15 @@ module Raft
     end
 
     def register_peer(id : NodeID, host : String, port : Int32)
-      if @running
-        ack = Channel(Nil).new(1)
-        @commands.send(RegisterPeerCommand.new(id, host, port, ack))
-        ack.receive # Wait for dispatcher to process
-      else
-        @peers[id] = {host, port}
-        persist_peers
-      end
+      @commands.send(RegisterPeerCommand.new(id, host, port))
     end
 
     def register_channel(group_id : UInt64, channel : Channel(Message))
-      if @running
-        @commands.send(RegisterChannelCommand.new(group_id, channel))
-      else
-        @channels[group_id] = channel
-      end
+      @commands.send(RegisterChannelCommand.new(group_id, channel))
     end
 
     def unregister_channel(group_id : UInt64)
-      if @running
-        @commands.send(UnregisterChannelCommand.new(group_id))
-      else
-        @channels.delete(group_id)
-      end
+      @commands.send(UnregisterChannelCommand.new(group_id))
     end
 
     def start
@@ -145,7 +129,6 @@ module Raft
       when RegisterPeerCommand
         @peers[cmd.id] = {cmd.host, cmd.port}
         persist_peers
-        cmd.ack.try(&.send(nil))
       end
     end
 
