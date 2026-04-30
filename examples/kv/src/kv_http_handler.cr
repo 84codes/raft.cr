@@ -28,6 +28,8 @@ class KVHttpHandler
     case {method, path}
     when {"GET", "/"}
       handle_web_ui(context)
+    when {"GET", "/events"}
+      handle_events(context)
     when {"GET", "/kv"}
       handle_list_all(context)
     when {"POST", "/kv/rebalance"}
@@ -90,11 +92,11 @@ class KVHttpHandler
                    String.build do |s|
                      s << "<table><tr><th>Key</th><th>Value</th><th>Group</th><th>Role</th><th>Leader</th><th></th></tr>"
                      entries.each do |key, value, group_id, role, leader|
-                       s << "<tr>"
-                       s << "<td>" << HTML.escape(key) << "</td>"
-                       is_leader = @nodes[group_id]?.try(&.role) == Raft::Role::Leader
                        escaped_key = HTML.escape(key)
                        escaped_value = HTML.escape(value || "")
+                       is_leader = @nodes[group_id]?.try(&.role) == Raft::Role::Leader
+                       s << "<tr data-key=\"" << escaped_key << "\">"
+                       s << "<td>" << escaped_key << "</td>"
                        if is_leader
                          s << "<td><input type=\"text\" class=\"inline-edit\" id=\"val-" << escaped_key << "\" value=\"" << escaped_value << "\"></td>"
                        else
@@ -160,54 +162,260 @@ class KVHttpHandler
     </head>
     <body>
       <h1>Multi-Raft KV Store</h1>
-      <div class="status">
-        <span>Node: <b>#{@meta_node.id}</b></span>
-        <span>Meta Role: <b class="#{meta_role.downcase}">#{meta_role}</b></span>
-        <span>Meta Term: <b>#{meta_term}</b></span>
-        <span>Meta Leader: <b>#{meta_leader || "unknown"}</b></span>
-        <span>Groups: <b>#{@meta_sm.all_groups.size}</b></span>
+      <div class="status" id="status-bar">
+        <span>Node: <b id="stat-node">#{@meta_node.id}</b></span>
+        <span>Meta Role: <b id="stat-meta-role" class="#{meta_role.downcase}">#{meta_role}</b></span>
+        <span>Meta Term: <b id="stat-meta-term">#{meta_term}</b></span>
+        <span>Meta Leader: <b id="stat-meta-leader">#{meta_leader || "unknown"}</b></span>
+        <span>Groups: <b id="stat-groups">#{@meta_sm.all_groups.size}</b></span>
       </div>
       <div class="info">Each key is its own Raft group. Different keys can have different leaders.</div>
 
       <h2>Stored Data</h2>
-      #{table_html}
+      <div id="table-area">#{table_html}</div>
 
       <h2>Add / Update Entry</h2>
-      #{form_html}
+      <div id="form-area">#{form_html}</div>
 
       <h2>Cluster Operations</h2>
       <button class="btn-rebalance" onclick="rebalance()">Rebalance Leaders</button>
       <span id="rebalance-result"></span>
 
       <script>
+        function $(id) { return document.getElementById(id); }
+        function setText(id, txt) { var el = $(id); if (el) el.textContent = txt; }
+
         function putKey(e) {
           e.preventDefault();
-          var key = document.getElementById('key').value;
-          var value = document.getElementById('value').value;
+          var key = $('key').value;
+          var value = $('value').value;
           fetch('/kv/' + encodeURIComponent(key), { method: 'PUT', body: value })
-            .then(function() { setTimeout(function() { location.reload(); }, 500); });
+            .then(function() { $('key').value = ''; $('value').value = ''; });
         }
         function updateKey(key) {
-          var value = document.getElementById('val-' + key).value;
-          fetch('/kv/' + encodeURIComponent(key), { method: 'PUT', body: value })
-            .then(function() { setTimeout(function() { location.reload(); }, 500); });
+          var input = $('val-' + key);
+          if (!input) return;
+          fetch('/kv/' + encodeURIComponent(key), { method: 'PUT', body: input.value });
+        }
+        function deleteKey(key) {
+          fetch('/kv/' + encodeURIComponent(key), { method: 'DELETE' });
         }
         function rebalance() {
           fetch('/kv/rebalance', { method: 'POST' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
-              document.getElementById('rebalance-result').textContent = data.transfers + ' transfer(s) initiated';
-              setTimeout(function() { location.reload(); }, 1000);
+              $('rebalance-result').textContent = data.transfers + ' transfer(s) initiated';
             });
         }
-        function deleteKey(key) {
-          fetch('/kv/' + encodeURIComponent(key), { method: 'DELETE' })
-            .then(function() { setTimeout(function() { location.reload(); }, 500); });
+
+        function applySnapshot(snap) {
+          var active = document.activeElement;
+          var activeInfo = null;
+          if (active && active.id) {
+            activeInfo = {
+              id: active.id,
+              value: 'value' in active ? active.value : null,
+              selStart: 'selectionStart' in active ? active.selectionStart : null,
+              selEnd: 'selectionEnd' in active ? active.selectionEnd : null
+            };
+          }
+
+          setText('stat-node', snap.node_id);
+          var roleEl = $('stat-meta-role');
+          if (roleEl) { roleEl.textContent = snap.meta.role; roleEl.className = snap.meta.role.toLowerCase(); }
+          setText('stat-meta-term', snap.meta.term);
+          setText('stat-meta-leader', snap.meta.leader == null ? 'unknown' : snap.meta.leader);
+          setText('stat-groups', snap.entries.length);
+
+          renderTable(snap.entries);
+          renderForm(snap.meta.is_leader, snap.meta.leader);
+
+          if (activeInfo) {
+            var el = $(activeInfo.id);
+            if (el) {
+              if (activeInfo.value !== null && 'value' in el) el.value = activeInfo.value;
+              try { el.focus(); } catch (e) {}
+              if (activeInfo.selStart !== null && el.setSelectionRange) {
+                try { el.setSelectionRange(activeInfo.selStart, activeInfo.selEnd); } catch (e) {}
+              }
+            }
+          }
         }
+
+        function renderTable(entries) {
+          var area = $('table-area');
+          if (entries.length === 0) {
+            area.innerHTML = '<p>No data stored.</p>';
+            return;
+          }
+          var table = area.querySelector('table');
+          if (!table) {
+            area.innerHTML = '';
+            table = document.createElement('table');
+            var header = document.createElement('tr');
+            ['Key', 'Value', 'Group', 'Role', 'Leader', ''].forEach(function(t) {
+              var th = document.createElement('th');
+              th.textContent = t;
+              header.appendChild(th);
+            });
+            table.appendChild(header);
+            area.appendChild(table);
+          }
+          var existing = {};
+          table.querySelectorAll('tr[data-key]').forEach(function(tr) {
+            existing[tr.getAttribute('data-key')] = tr;
+          });
+          var seen = {};
+          entries.forEach(function(e) {
+            seen[e.key] = true;
+            var tr = existing[e.key];
+            if (!tr) {
+              tr = document.createElement('tr');
+              tr.setAttribute('data-key', e.key);
+              for (var i = 0; i < 6; i++) tr.appendChild(document.createElement('td'));
+              table.appendChild(tr);
+            }
+            var tds = tr.children;
+            tds[0].textContent = e.key;
+            if (e.is_leader) {
+              var input = tds[1].querySelector('input.inline-edit');
+              if (!input) {
+                tds[1].innerHTML = '';
+                input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'inline-edit';
+                input.id = 'val-' + e.key;
+                tds[1].appendChild(input);
+              }
+              if (document.activeElement !== input) {
+                input.value = e.value == null ? '' : e.value;
+              }
+            } else {
+              tds[1].textContent = e.value == null ? '(nil)' : e.value;
+            }
+            tds[2].textContent = e.group_id;
+            tds[3].textContent = e.role;
+            tds[3].className = e.role.toLowerCase();
+            tds[4].textContent = e.leader == null ? 'unknown' : e.leader;
+            if (e.is_leader) {
+              if (!tds[5].querySelector('button')) {
+                tds[5].innerHTML = '';
+                var key = e.key;
+                var upd = document.createElement('button');
+                upd.className = 'btn-update';
+                upd.textContent = 'Update';
+                upd.addEventListener('click', function() { updateKey(key); });
+                var del = document.createElement('button');
+                del.className = 'btn-delete';
+                del.textContent = 'Delete';
+                del.addEventListener('click', function() { deleteKey(key); });
+                tds[5].appendChild(upd);
+                tds[5].appendChild(document.createTextNode(' '));
+                tds[5].appendChild(del);
+              }
+            } else if (tds[5].children.length > 0) {
+              tds[5].innerHTML = '';
+            }
+          });
+          Object.keys(existing).forEach(function(k) {
+            if (!seen[k]) existing[k].remove();
+          });
+        }
+
+        function renderForm(isLeader, leader) {
+          var area = $('form-area');
+          if (isLeader) {
+            if (!area.querySelector('form')) {
+              area.innerHTML = '';
+              var form = document.createElement('form');
+              form.onsubmit = putKey;
+              var k = document.createElement('input');
+              k.type = 'text'; k.id = 'key'; k.placeholder = 'Key'; k.required = true;
+              var v = document.createElement('input');
+              v.type = 'text'; v.id = 'value'; v.placeholder = 'Value'; v.required = true;
+              var btn = document.createElement('button');
+              btn.type = 'submit'; btn.className = 'btn-put'; btn.textContent = 'Put';
+              form.appendChild(k);
+              form.appendChild(v);
+              form.appendChild(btn);
+              area.appendChild(form);
+            }
+          } else {
+            var msg = 'This node is not the meta leader. Meta leader: node ' + (leader == null ? 'unknown' : leader);
+            var p = area.querySelector('.not-leader');
+            if (!p) {
+              area.innerHTML = '';
+              p = document.createElement('p');
+              p.className = 'not-leader';
+              area.appendChild(p);
+            }
+            p.textContent = msg;
+          }
+        }
+
+        (function() {
+          var es = new EventSource('/events');
+          es.onmessage = function(ev) {
+            try { applySnapshot(JSON.parse(ev.data)); } catch (e) { console.error(e); }
+          };
+        })();
       </script>
     </body>
     </html>
     HTML
+  end
+
+  private def write_snapshot(io : IO)
+    JSON.build(io) do |json|
+      json.object do
+        json.field "node_id", @meta_node.id
+        json.field "meta" do
+          json.object do
+            json.field "role", @meta_node.role.to_s
+            json.field "term", @meta_node.current_term
+            json.field "leader", @meta_node.leader_id
+            json.field "is_leader", @meta_node.role == Raft::Role::Leader
+            json.field "groups", @meta_sm.all_groups.size
+          end
+        end
+        json.field "entries" do
+          json.array do
+            @meta_sm.all_groups.each do |key, group_id|
+              vsm = @value_machines[group_id]?
+              value = vsm.try(&.value)
+              node = @nodes[group_id]?
+              role = node.try(&.role.to_s) || "unknown"
+              leader = node.try(&.leader_id)
+              is_leader = node.try(&.role) == Raft::Role::Leader
+              json.object do
+                json.field "key", key
+                json.field "value", value
+                json.field "group_id", group_id
+                json.field "role", role
+                json.field "leader", leader
+                json.field "is_leader", is_leader
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  private def handle_events(context)
+    context.response.content_type = "text/event-stream"
+    context.response.headers["Cache-Control"] = "no-cache"
+    context.response.headers["X-Accel-Buffering"] = "no"
+
+    loop do
+      context.response << "data: "
+      write_snapshot(context.response)
+      context.response << "\n\n"
+      context.response.flush
+      sleep 1.second
+    end
+  rescue IO::Error
+    # Client disconnected
   end
 
   private def update_node_gauges(node : Raft::Node(KVCommand))
