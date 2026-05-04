@@ -83,7 +83,7 @@ crystal spec -Dpreview_mt -Dexecution_context
 
 ## Architecture
 
-See [design document](docs/plans/2026-03-07-raft-consensus-design.md) for full details.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the layered design, class roles, performance trade-offs, and Raft spec compliance.
 
 ## License
 
