@@ -145,18 +145,69 @@ class QueueHttpHandler
   end
 
   private def handle_delete(context, name : String)
-    context.response.status_code = 501
-    context.response.print "Not implemented yet"
+    unless @meta_sm.group_for(name)
+      context.response.status_code = 404
+      context.response.content_type = "application/json"
+      context.response.print({error: "queue not found"}.to_json)
+      return
+    end
+    unless @meta_node.role == Raft::Role::Leader
+      return if forward_to_leader(context, @meta_node)
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "not meta leader", leader_id: @meta_node.leader_id}.to_json)
+      return
+    end
+    @meta_node.propose(QueueCommand.new(QueueAction::DeleteQueue, name))
+    context.response.status_code = 202
+    context.response.content_type = "application/json"
+    context.response.print({status: "delete_accepted", queue: name}.to_json)
   end
 
   private def handle_list_queues(context)
-    context.response.status_code = 501
-    context.response.print "Not implemented yet"
+    queues = [] of NamedTuple(name: String, group_id: UInt64, depth: Int32, is_leader: Bool, leader_id: Raft::NodeID?)
+    @meta_sm.all_groups.each do |name, group_id|
+      sm = @state_machines[group_id]?
+      node = @nodes[group_id]?
+      depth = sm.try(&.depth) || 0
+      is_leader = node.try(&.role) == Raft::Role::Leader
+      leader_id = node.try(&.leader_id)
+      queues << {name: name, group_id: group_id, depth: depth, is_leader: is_leader, leader_id: leader_id}
+    end
+    context.response.content_type = "application/json"
+    context.response.print queues.to_json
   end
 
   private def handle_events(context, name : String)
-    context.response.status_code = 501
-    context.response.print "Not implemented yet"
+    unless @meta_sm.group_for(name)
+      context.response.status_code = 404
+      context.response.print "queue not found"
+      return
+    end
+    context.response.headers["Content-Type"] = "text/event-stream"
+    context.response.headers["Cache-Control"] = "no-cache"
+    context.response.headers["Connection"] = "keep-alive"
+
+    # Naive polling SSE — emits a depth snapshot every 500ms.
+    # Sufficient for the PoC; a future iteration can hook into apply().
+    last_depth = -1
+    deadline_check_interval = 500.milliseconds
+    begin
+      loop do
+        group_id = @meta_sm.group_for(name)
+        break unless group_id
+        sm = @state_machines[group_id]?
+        depth = sm.try(&.depth) || 0
+        if depth != last_depth
+          context.response << "data: " << {queue: name, depth: depth}.to_json << "\n\n"
+          context.response.flush
+          last_depth = depth
+        end
+        sleep deadline_check_interval
+      end
+    rescue IO::Error
+      # client disconnected
+    end
   end
 
   private def handle_web_ui(context)
