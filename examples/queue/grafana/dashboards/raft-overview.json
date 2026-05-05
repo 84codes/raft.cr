@@ -1,0 +1,311 @@
+{
+  "title": "Raft Cluster Overview",
+  "uid": "raft-overview",
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Leader Changes",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "changes(max by (group_id) (raft_node_leader_id)[1m]) > 0",
+        "tagKeys": "group_id",
+        "titleFormat": "Leader changed",
+        "textFormat": "Group {{group_id}} leader changed",
+        "iconColor": "orange"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Meta Quorum Nodes",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "count(raft_node_role{group_id=\"0\"})",
+          "legendFormat": "Connected"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "green", "value": 3 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Active Groups",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "count(count by (group_id) (raft_kv_group_active))",
+          "legendFormat": "Groups"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Max Commit Lag",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "max(raft_node_last_log_index - raft_node_commit_index)",
+          "legendFormat": "Lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Election Rate",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(rate(raft_elections_total[1m]))",
+          "legendFormat": "Elections/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Leader Distribution per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (node_id) (raft_node_is_leader)",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Cluster Messages Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (node_id) (rate(raft_messages_sent_total[1m]))",
+          "legendFormat": "N{{node_id}} sent"
+        },
+        {
+          "expr": "sum by (node_id) (rate(raft_messages_received_total[1m]))",
+          "legendFormat": "N{{node_id}} recv"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Groups Overview (click group to drill down)",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "targets": [
+        {
+          "expr": "max by (group_id) (raft_node_leader_id) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "format": "table",
+          "instant": true,
+          "refId": "leader"
+        },
+        {
+          "expr": "max by (group_id) (raft_node_term) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "format": "table",
+          "instant": true,
+          "refId": "term"
+        },
+        {
+          "expr": "min by (group_id) (raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "format": "table",
+          "instant": true,
+          "refId": "commit"
+        },
+        {
+          "expr": "max by (group_id) (raft_node_last_log_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "format": "table",
+          "instant": true,
+          "refId": "log_index"
+        },
+        {
+          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "format": "table",
+          "instant": true,
+          "refId": "lag"
+        },
+        {
+          "expr": "max by (group_id, followers) (raft_kv_group_info)",
+          "format": "table",
+          "instant": true,
+          "refId": "followers"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToColumns",
+          "options": { "byField": "group_id" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Value #followers": true,
+              "leader": true,
+              "node_id": true
+            },
+            "indexByName": {
+              "group_id": 0,
+              "Value #leader": 1,
+              "followers": 2,
+              "Value #term": 3,
+              "Value #commit": 4,
+              "Value #log_index": 5,
+              "Value #lag": 6
+            },
+            "renameByName": {
+              "group_id": "Group",
+              "Value #leader": "Leader",
+              "followers": "Followers",
+              "Value #term": "Term",
+              "Value #commit": "Min Commit",
+              "Value #log_index": "Max Log Index",
+              "Value #lag": "Max Lag"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Group" },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "View Group ${__value.text}",
+                    "url": "/d/raft-group/raft-group-detail?var-group_id=${__value.text}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Max Lag" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 1 },
+                    { "color": "red", "value": 5 }
+                  ]
+                }
+              },
+              { "id": "custom.displayMode", "value": "color-background" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "title": "Elections Rate per Group",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rate(raft_elections_total[1m])) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "legendFormat": "Group {{group_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Commit Lag per Group",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "legendFormat": "Group {{group_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

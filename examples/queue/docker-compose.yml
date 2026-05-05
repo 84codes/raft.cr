@@ -1,0 +1,80 @@
+# examples/kv/docker-compose.yml
+services:
+  node-1:
+    build:
+      context: ../..
+      dockerfile: examples/queue/Dockerfile
+    environment:
+      NODE_ID: "1"
+      HTTP_PORT: "8001"
+      RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-1:9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8001:8001"
+    volumes:
+      - node1-data:/data/raft
+
+  node-2:
+    build:
+      context: ../..
+      dockerfile: examples/queue/Dockerfile
+    environment:
+      NODE_ID: "2"
+      HTTP_PORT: "8002"
+      RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-2:9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8002:8002"
+    volumes:
+      - node2-data:/data/raft
+
+  node-3:
+    build:
+      context: ../..
+      dockerfile: examples/queue/Dockerfile
+    environment:
+      NODE_ID: "3"
+      HTTP_PORT: "8003"
+      RAFT_PORT: "9000"
+      RAFT_ADVERTISE_ADDRESS: "node-3:9000"
+      DATA_DIR: "/data/raft"
+    ports:
+      - "8003:8003"
+    volumes:
+      - node3-data:/data/raft
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--log.level=warn"]
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_LOG_LEVEL: "warn"
+    ports:
+      - "3000:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

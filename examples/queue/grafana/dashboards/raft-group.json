@@ -1,0 +1,553 @@
+{
+  "title": "Raft Group Detail",
+  "uid": "raft-group",
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "group_id",
+        "type": "query",
+        "query": "label_values(raft_node_role, group_id)",
+        "current": { "text": "0", "value": "0" },
+        "refresh": 2,
+        "sort": 3
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Leader Changes",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "changes(raft_node_leader_id{group_id=\"$group_id\"}[1m]) > 0",
+        "tagKeys": "node_id",
+        "titleFormat": "Leader changed",
+        "textFormat": "Group $group_id leader changed (node {{node_id}})",
+        "iconColor": "orange"
+      },
+      {
+        "name": "Elections",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "increase(raft_elections_total{group_id=\"$group_id\"}[1m]) > 0",
+        "tagKeys": "node_id",
+        "titleFormat": "Election started",
+        "textFormat": "Node {{node_id}} started election",
+        "iconColor": "red"
+      },
+      {
+        "name": "State Transitions",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "increase(raft_state_transitions_total{group_id=\"$group_id\"}[1m]) > 0",
+        "tagKeys": "node_id,from,to",
+        "titleFormat": "Role: {{from}} → {{to}}",
+        "textFormat": "Node {{node_id}}: {{from}} → {{to}}",
+        "iconColor": "purple"
+      },
+      {
+        "name": "Log Truncations",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "increase(raft_log_truncations_total{group_id=\"$group_id\"}[1m]) > 0",
+        "tagKeys": "node_id",
+        "titleFormat": "Log truncated",
+        "textFormat": "Node {{node_id}} truncated log (conflict)",
+        "iconColor": "yellow"
+      },
+      {
+        "name": "Leadership Transfers",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "expr": "increase(raft_leadership_transfers_total{group_id=\"$group_id\",result=\"completed\"}[1m]) > 0",
+        "tagKeys": "node_id",
+        "titleFormat": "Leadership transferred",
+        "textFormat": "Node {{node_id}} transferred leadership",
+        "iconColor": "green"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Group $group_id — Leader",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "max(raft_node_leader_id{group_id=\"$group_id\"})",
+          "legendFormat": "Leader Node"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "green" } }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Term",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "max(raft_node_term{group_id=\"$group_id\"})",
+          "legendFormat": "Term"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Commit Index (min across nodes)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "min(raft_node_commit_index{group_id=\"$group_id\"})",
+          "legendFormat": "Commit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Max Lag",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "max(raft_node_last_log_index{group_id=\"$group_id\"} - raft_node_commit_index{group_id=\"$group_id\"})",
+          "legendFormat": "Lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Node Roles",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "expr": "raft_node_role{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "role"
+        },
+        {
+          "expr": "raft_node_term{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "term"
+        },
+        {
+          "expr": "raft_node_commit_index{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "commit"
+        },
+        {
+          "expr": "raft_node_last_log_index{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "log_index"
+        },
+        {
+          "expr": "raft_node_leader_id{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "leader_id"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToColumns",
+          "options": { "byField": "node_id" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "group_id 1": true,
+              "group_id 2": true,
+              "group_id 3": true,
+              "group_id 4": true,
+              "group_id 5": true,
+              "instance 1": true,
+              "instance 2": true,
+              "instance 3": true,
+              "instance 4": true,
+              "instance 5": true,
+              "job 1": true,
+              "job 2": true,
+              "job 3": true,
+              "job 4": true,
+              "job 5": true,
+              "__name__ 1": true,
+              "__name__ 2": true,
+              "__name__ 3": true,
+              "__name__ 4": true,
+              "__name__ 5": true
+            },
+            "indexByName": {
+              "node_id": 0,
+              "Value #role": 1,
+              "Value #term": 2,
+              "Value #commit": 3,
+              "Value #log_index": 4,
+              "Value #leader_id": 5
+            },
+            "renameByName": {
+              "node_id": "Node",
+              "Value #role": "Role",
+              "Value #term": "Term",
+              "Value #commit": "Commit Index",
+              "Value #log_index": "Log Index",
+              "Value #leader_id": "Sees Leader"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Role" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "0": { "text": "Follower", "color": "blue" } } },
+                  { "type": "value", "options": { "1": { "text": "Candidate", "color": "orange" } } },
+                  { "type": "value", "options": { "2": { "text": "Leader", "color": "green" } } }
+                ]
+              },
+              { "id": "custom.displayMode", "value": "color-text" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "title": "Term over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "raft_node_term{group_id=\"$group_id\"}",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Commit Index over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "raft_node_commit_index{group_id=\"$group_id\"}",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Log Index over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "raft_node_last_log_index{group_id=\"$group_id\"}",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Commit Lag per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "raft_node_last_log_index{group_id=\"$group_id\"} - raft_node_commit_index{group_id=\"$group_id\"}",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Messages Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 26, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(raft_messages_sent_total{group_id=\"$group_id\"}[1m])",
+          "legendFormat": "N{{node_id}} sent"
+        },
+        {
+          "expr": "rate(raft_messages_received_total{group_id=\"$group_id\"}[1m])",
+          "legendFormat": "N{{node_id}} recv"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Elections Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 26, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(raft_elections_total{group_id=\"$group_id\"}[1m])",
+          "legendFormat": "Node {{node_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Protocol Events per Node",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "raft_elections_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "elections"
+        },
+        {
+          "expr": "raft_prevote_campaigns_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "prevotes"
+        },
+        {
+          "expr": "raft_votes_granted_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "votes_granted"
+        },
+        {
+          "expr": "raft_votes_denied_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "votes_denied"
+        },
+        {
+          "expr": "raft_proposals_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "proposals"
+        },
+        {
+          "expr": "raft_entries_applied_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "applied"
+        },
+        {
+          "expr": "raft_commit_advances_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "commits"
+        },
+        {
+          "expr": "raft_log_truncations_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "truncations"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToColumns",
+          "options": { "byField": "node_id" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true,
+              "Time 5": true, "Time 6": true, "Time 7": true, "Time 8": true,
+              "group_id 1": true, "group_id 2": true, "group_id 3": true, "group_id 4": true,
+              "group_id 5": true, "group_id 6": true, "group_id 7": true, "group_id 8": true,
+              "instance 1": true, "instance 2": true, "instance 3": true, "instance 4": true,
+              "instance 5": true, "instance 6": true, "instance 7": true, "instance 8": true,
+              "job 1": true, "job 2": true, "job 3": true, "job 4": true,
+              "job 5": true, "job 6": true, "job 7": true, "job 8": true,
+              "__name__ 1": true, "__name__ 2": true, "__name__ 3": true, "__name__ 4": true,
+              "__name__ 5": true, "__name__ 6": true, "__name__ 7": true, "__name__ 8": true
+            },
+            "indexByName": {
+              "node_id": 0,
+              "Value #elections": 1,
+              "Value #prevotes": 2,
+              "Value #votes_granted": 3,
+              "Value #votes_denied": 4,
+              "Value #proposals": 5,
+              "Value #applied": 6,
+              "Value #commits": 7,
+              "Value #truncations": 8
+            },
+            "renameByName": {
+              "node_id": "Node",
+              "Value #elections": "Elections",
+              "Value #prevotes": "Pre-votes",
+              "Value #votes_granted": "Votes Given",
+              "Value #votes_denied": "Votes Denied",
+              "Value #proposals": "Proposals",
+              "Value #applied": "Applied",
+              "Value #commits": "Commit Advances",
+              "Value #truncations": "Truncations"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Replication & Errors per Node",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 7 },
+      "targets": [
+        {
+          "expr": "raft_log_entries_sent_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "sent"
+        },
+        {
+          "expr": "raft_log_entries_received_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "received"
+        },
+        {
+          "expr": "raft_replication_rejections_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "repl_rejected"
+        },
+        {
+          "expr": "sum by (node_id) (raft_append_entries_rejected_total{group_id=\"$group_id\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "ae_rejected"
+        },
+        {
+          "expr": "sum by (node_id) (raft_term_changes_total{group_id=\"$group_id\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "term_changes"
+        },
+        {
+          "expr": "sum by (node_id) (raft_leadership_transfers_total{group_id=\"$group_id\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "transfers"
+        },
+        {
+          "expr": "raft_timeout_now_received_total{group_id=\"$group_id\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "timeout_now"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToColumns",
+          "options": { "byField": "node_id" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true,
+              "Time 5": true, "Time 6": true, "Time 7": true,
+              "group_id 1": true, "group_id 2": true, "group_id 3": true, "group_id 4": true,
+              "group_id 5": true, "group_id 6": true, "group_id 7": true,
+              "instance 1": true, "instance 2": true, "instance 3": true, "instance 4": true,
+              "instance 5": true, "instance 6": true, "instance 7": true,
+              "job 1": true, "job 2": true, "job 3": true, "job 4": true,
+              "job 5": true, "job 6": true, "job 7": true,
+              "__name__ 1": true, "__name__ 2": true, "__name__ 3": true, "__name__ 4": true,
+              "__name__ 5": true, "__name__ 6": true, "__name__ 7": true
+            },
+            "indexByName": {
+              "node_id": 0,
+              "Value #sent": 1,
+              "Value #received": 2,
+              "Value #repl_rejected": 3,
+              "Value #ae_rejected": 4,
+              "Value #term_changes": 5,
+              "Value #transfers": 6,
+              "Value #timeout_now": 7
+            },
+            "renameByName": {
+              "node_id": "Node",
+              "Value #sent": "Entries Sent",
+              "Value #received": "Entries Recv",
+              "Value #repl_rejected": "Repl Rejections",
+              "Value #ae_rejected": "AE Rejections",
+              "Value #term_changes": "Term Changes",
+              "Value #transfers": "Transfers",
+              "Value #timeout_now": "TimeoutNow Recv"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
