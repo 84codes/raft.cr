@@ -117,12 +117,12 @@ stateDiagram-v2
     [*] --> Follower
     Follower --> Follower: AppendEntries (heartbeat)
     Follower --> Follower: PreVote (grant if log up-to-date)
-    Follower --> Candidate: TimeoutNow received\n(leadership transfer)
+    Follower --> Candidate: TimeoutNow received (leadership transfer)
     Follower --> PreCandidate: election timeout
     PreCandidate --> Candidate: pre-vote quorum
     PreCandidate --> Follower: pre-vote denied / higher term
     Candidate --> Leader: vote quorum
-    Candidate --> Follower: higher term seen\nor AppendEntries from leader
+    Candidate --> Follower: higher term seen or AppendEntries from leader
     Leader --> Follower: higher term seen
     Candidate --> PreCandidate: election timeout
 ```

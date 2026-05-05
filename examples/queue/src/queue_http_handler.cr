@@ -165,14 +165,15 @@ class QueueHttpHandler
   end
 
   private def handle_list_queues(context)
-    queues = [] of NamedTuple(name: String, group_id: UInt64, depth: Int32, is_leader: Bool, leader_id: Raft::NodeID?)
+    queues = [] of NamedTuple(name: String, group_id: UInt64, depth: Int32, log_last_index: UInt64, is_leader: Bool, leader_id: Raft::NodeID?)
     @meta_sm.all_groups.each do |name, group_id|
       sm = @state_machines[group_id]?
       node = @nodes[group_id]?
       depth = sm.try(&.depth) || 0
+      log_last_index = node.try(&.log.last_index) || 0_u64
       is_leader = node.try(&.role) == Raft::Role::Leader
       leader_id = node.try(&.leader_id)
-      queues << {name: name, group_id: group_id, depth: depth, is_leader: is_leader, leader_id: leader_id}
+      queues << {name: name, group_id: group_id, depth: depth, log_last_index: log_last_index, is_leader: is_leader, leader_id: leader_id}
     end
     context.response.content_type = "application/json"
     context.response.print queues.to_json
@@ -211,8 +212,91 @@ class QueueHttpHandler
   end
 
   private def handle_web_ui(context)
-    context.response.status_code = 501
-    context.response.print "Not implemented yet"
+    context.response.content_type = "text/html"
+    context.response << <<-HTML
+      <!doctype html>
+      <html>
+      <head>
+        <title>Queue PoC</title>
+        <style>
+          body { font-family: -apple-system, sans-serif; margin: 2em; }
+          h1 { font-size: 18px; }
+          table { border-collapse: collapse; margin-top: 1em; }
+          th, td { border: 1px solid #ccc; padding: 6px 12px; text-align: left; }
+          th { background: #f0f0f0; }
+          .leader { color: #060; font-weight: bold; }
+          .info { color: #666; font-size: 12px; }
+          form { margin-top: 1em; }
+          input { padding: 4px; }
+          button { padding: 4px 12px; }
+        </style>
+      </head>
+      <body>
+        <h1>Queue PoC — live state</h1>
+        <p class="info">Each queue is its own Raft group. Watch the gap grow between in-memory depth and on-disk log entries.</p>
+        <table id="queues">
+          <thead>
+            <tr><th>Queue</th><th>Group</th><th>Depth (memory)</th><th>Log entries (disk)</th><th>Leader</th><th>Role here</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <form id="publish-form" onsubmit="publish(); return false;">
+          <input id="qname" placeholder="queue name" required>
+          <input id="body" placeholder="message body" required>
+          <button>Publish</button>
+        </form>
+        <form id="consume-form" onsubmit="consume(); return false;">
+          <input id="qname-c" placeholder="queue name" required>
+          <button>Consume one</button>
+        </form>
+        <pre id="last-consume"></pre>
+
+        <script>
+          async function refresh() {
+            const r = await fetch('/queues');
+            const list = await r.json();
+            const tbody = document.querySelector('#queues tbody');
+            function esc(s) { var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+            tbody.innerHTML = list.map(q =>
+              '<tr>' +
+                '<td>' + esc(q.name) + '</td>' +
+                '<td>' + q.group_id + '</td>' +
+                '<td>' + q.depth + '</td>' +
+                '<td>' + q.log_last_index + '</td>' +
+                '<td>' + (q.leader_id || 'unknown') + '</td>' +
+                '<td>' + (q.is_leader ? '<span class="leader">leader</span>' : 'follower') + '</td>' +
+              '</tr>'
+            ).join('');
+          }
+
+          async function publish() {
+            const name = document.getElementById('qname').value;
+            const body = document.getElementById('body').value;
+            const r = await fetch('/queues/' + encodeURIComponent(name), {method: 'POST', body: body});
+            console.log('publish:', r.status);
+            refresh();
+          }
+
+          async function consume() {
+            const name = document.getElementById('qname-c').value;
+            const r = await fetch('/queues/' + encodeURIComponent(name) + '/messages');
+            const out = document.getElementById('last-consume');
+            if (r.status === 204) {
+              out.textContent = '(empty)';
+            } else if (r.status === 200) {
+              out.textContent = await r.text();
+            } else {
+              out.textContent = 'error: ' + r.status;
+            }
+            refresh();
+          }
+
+          refresh();
+          setInterval(refresh, 1000);
+        </script>
+      </body>
+      </html>
+    HTML
   end
 
   private def forward_to_leader(context, node : Raft::Node(QueueCommand)) : Bool
