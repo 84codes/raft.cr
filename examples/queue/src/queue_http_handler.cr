@@ -96,8 +96,52 @@ class QueueHttpHandler
   end
 
   private def handle_consume(context, name : String)
-    context.response.status_code = 501
-    context.response.print "Not implemented yet"
+    group_id = @meta_sm.group_for(name)
+    unless group_id
+      context.response.status_code = 404
+      context.response.content_type = "application/json"
+      context.response.print({error: "queue not found"}.to_json)
+      return
+    end
+
+    node = @nodes[group_id]?
+    sm = @state_machines[group_id]?
+    unless node && sm
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "queue group not loaded on this node"}.to_json)
+      return
+    end
+
+    unless node.role == Raft::Role::Leader
+      return if forward_to_leader(context, node)
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "not leader for queue", leader_id: node.leader_id}.to_json)
+      return
+    end
+
+    req_id = UUID.random.to_s
+    ch = Channel(Bytes?).new(1)
+    sm.register_request(req_id, ch)
+    node.propose(QueueCommand.new(QueueAction::Consume, name, req_id: req_id))
+
+    select
+    when result = ch.receive
+      sm.cancel_request(req_id) # safe even if already delivered
+      if popped = result
+        context.response.status_code = 200
+        context.response.content_type = "application/octet-stream"
+        context.response.write(popped)
+      else
+        context.response.status_code = 204
+      end
+    when timeout(5.seconds)
+      sm.cancel_request(req_id)
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "consume timeout — leader may have changed"}.to_json)
+    end
   end
 
   private def handle_delete(context, name : String)
