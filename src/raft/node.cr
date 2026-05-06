@@ -377,27 +377,45 @@ module Raft
 
       # Check prev_log consistency
       if msg.prev_log_index > 0
-        if msg.prev_log_index > @log.last_index
-          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "log_gap"}))
-          @outbox << {msg.from, Message.new(
-            type: MessageType::AppendEntriesResponse,
-            from: @id,
-            term: @current_term,
-            success: false,
-            reject_hint: @log.last_index,
-          )}
-          return
-        end
-        if @log.term_at(msg.prev_log_index) != msg.prev_log_term
-          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
-          @outbox << {msg.from, Message.new(
-            type: MessageType::AppendEntriesResponse,
-            from: @id,
-            term: @current_term,
-            success: false,
-            reject_hint: msg.prev_log_index - 1,
-          )}
-          return
+        if msg.prev_log_index < @snapshot_index
+          # Fully covered by snapshot; nothing to verify locally.
+        elsif msg.prev_log_index == @snapshot_index && @snapshot_index > 0
+          # At the snapshot boundary — verify the term matches the snapshot's term.
+          if msg.prev_log_term != @snapshot_term
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: msg.prev_log_index - 1,
+            )}
+            return
+          end
+        else
+          # prev_log_index > @snapshot_index — use the log.
+          if msg.prev_log_index > @log.last_index
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "log_gap"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: @log.last_index,
+            )}
+            return
+          end
+          if @log.term_at(msg.prev_log_index) != msg.prev_log_term
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: msg.prev_log_index - 1,
+            )}
+            return
+          end
         end
       end
 
@@ -431,7 +449,7 @@ module Raft
         apply_entries(@commit_index + 1, new_commit)
         # If we were removed and log was reset by apply_configuration, skip the update
         unless @peers.empty? && @log.last_index == 0_u64
-          @commit_index = new_commit
+          @commit_index = Math.max(@commit_index, new_commit)
           @metrics.try(&.increment("raft_commit_advances_total"))
           persist_state
         end
@@ -675,7 +693,7 @@ module Raft
           raise "InstallSnapshot: header (#{msg.prev_log_index}, #{msg.prev_log_term}) != body (#{@snapshot_index}, #{@snapshot_term})"
         end
 
-        @log.reset
+        @log.reset_to(@snapshot_index)
         @last_applied = @snapshot_index
         @commit_index = @snapshot_index
         persist_state

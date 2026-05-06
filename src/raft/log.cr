@@ -86,6 +86,17 @@ module Raft
       new_segment(1_u64)
     end
 
+    # Reset the log to a specific index, as after installing a snapshot.
+    # After this call, @last_index == index and the next append produces index + 1.
+    def reset_to(index : UInt64)
+      @segments.each(&.close)
+      @segments.clear
+      Dir.glob(File.join(@config.data_dir, "*.log")) { |f| File.delete(f) }
+      @last_index = index
+      @last_term = 0_u64
+      new_segment(index + 1_u64)
+    end
+
     def close
       @segments.each(&.close)
     end
