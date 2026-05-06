@@ -24,8 +24,7 @@ module Raft
   end
 
   struct Message
-    PROTOCOL_VERSION       = 1_u8
-    MAX_ENTRIES_DATA_SIZE = 64_u32 * 1024 * 1024 # 64 MB
+    PROTOCOL_VERSION = 1_u8
 
     property protocol_version : UInt8
     property group_id : UInt64
@@ -78,7 +77,7 @@ module Raft
       io.write(@entries_data) if @entries_data.size > 0
     end
 
-    def self.from_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian) : self
+    def self.from_io(io : IO, max_payload : UInt32, format : IO::ByteFormat = IO::ByteFormat::LittleEndian) : self
       msg = new(
         protocol_version: io.read_bytes(UInt8, format),
         group_id: io.read_bytes(UInt64, format),
@@ -95,7 +94,7 @@ module Raft
       )
       msg.entries_count = io.read_bytes(UInt32, format)
       data_size = io.read_bytes(UInt32, format)
-      raise IO::Error.new("entries_data size #{data_size} exceeds maximum #{MAX_ENTRIES_DATA_SIZE}") if data_size > MAX_ENTRIES_DATA_SIZE
+      raise IO::Error.new("entries_data size #{data_size} exceeds max_message_payload_bytes #{max_payload}") if data_size > max_payload
       if data_size > 0
         entries_data = Bytes.new(data_size)
         io.read_fully(entries_data)

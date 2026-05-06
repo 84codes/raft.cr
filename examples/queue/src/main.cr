@@ -17,7 +17,7 @@ base_data_dir = ENV["DATA_DIR"]? || "/data/raft"
 
 Dir.mkdir_p(base_data_dir)
 
-transport = Raft::TCPTransport.new(listen_address: "0.0.0.0", listen_port: raft_port, data_dir: base_data_dir)
+transport = Raft::TCPTransport.new(listen_address: "0.0.0.0", listen_port: raft_port, data_dir: base_data_dir, max_payload: 64_u32 * 1024_u32 * 1024_u32)
 
 nodes = Hash(UInt64, Raft::Node(QueueCommand)).new
 state_machines = Hash(UInt64, QueueStateMachine).new
