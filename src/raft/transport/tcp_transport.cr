@@ -51,6 +51,13 @@ module Raft
       @commands.send(RegisterPeerCommand.new(id, host, port))
     end
 
+    # Look up a registered peer's host:port. Reads the registry directly;
+    # mutations happen on the dispatcher fiber and the registry is mostly
+    # stable after bootstrap, so unsynchronized reads are acceptable here.
+    def peer_address?(id : NodeID) : {String, Int32}?
+      @peers[id]?
+    end
+
     def register_channel(group_id : UInt64, channel : Channel(Message))
       @commands.send(RegisterChannelCommand.new(group_id, channel))
     end

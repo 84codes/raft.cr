@@ -10,8 +10,9 @@ class QueueHttpHandler
   @meta_sm : MetaStateMachine
   @nodes : Hash(UInt64, Raft::Node(QueueCommand))
   @state_machines : Hash(UInt64, QueueStateMachine)
+  @transport : Raft::TCPTransport
 
-  def initialize(@meta_node, @meta_sm, @nodes, @state_machines)
+  def initialize(@meta_node, @meta_sm, @nodes, @state_machines, @transport)
   end
 
   def call(context : HTTP::Server::Context)
@@ -60,39 +61,60 @@ class QueueHttpHandler
   end
 
   private def handle_publish(context, name : String)
-    if group_id = @meta_sm.group_for(name)
-      if node = @nodes[group_id]?
-        unless node.role == Raft::Role::Leader
-          return if forward_to_leader(context, node)
-          context.response.status_code = 503
-          context.response.content_type = "application/json"
-          context.response.print({error: "not leader for queue", leader_id: node.leader_id}.to_json)
-          return
-        end
-        body = context.request.body.try(&.gets_to_end) || ""
-        node.propose(QueueCommand.new(QueueAction::Publish, name, body: body.to_slice))
-        context.response.status_code = 202
-        context.response.content_type = "application/json"
-        context.response.print({status: "accepted", queue: name}.to_json)
-      else
-        context.response.status_code = 503
-        context.response.content_type = "application/json"
-        context.response.print({error: "queue group not loaded on this node"}.to_json)
-      end
-    else
-      # Auto-create via meta consensus, then accept the publish on retry
+    body = context.request.body.try(&.gets_to_end) || ""
+
+    unless @meta_sm.group_for(name)
+      # Auto-create via meta consensus, then fall through to the publish path.
       unless @meta_node.role == Raft::Role::Leader
-        return if forward_to_leader(context, @meta_node)
+        return if forward_to_leader(context, @meta_node, body)
         context.response.status_code = 503
         context.response.content_type = "application/json"
         context.response.print({error: "not meta leader", leader_id: @meta_node.leader_id}.to_json)
         return
       end
       @meta_node.propose(QueueCommand.new(QueueAction::CreateQueue, name))
-      context.response.status_code = 202
-      context.response.content_type = "application/json"
-      context.response.print({status: "queue_creation_accepted", queue: name}.to_json)
     end
+
+    # Wait for the queue to exist in the meta SM, the local data group to be
+    # spun up, and a leader to be known so we can either propose or proxy.
+    group_id = nil
+    node = nil
+    120.times do
+      group_id = @meta_sm.group_for(name)
+      if group_id
+        node = @nodes[group_id]?
+        break if node && (node.role == Raft::Role::Leader || !node.leader_id.nil?)
+      end
+      sleep 25.milliseconds
+    end
+
+    unless group_id
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "queue creation timed out"}.to_json)
+      return
+    end
+
+    unless node
+      return if forward_to_leader(context, @meta_node, body)
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "queue group not loaded on this node"}.to_json)
+      return
+    end
+
+    unless node.role == Raft::Role::Leader
+      return if forward_to_leader(context, node, body)
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "not leader for queue", leader_id: node.leader_id}.to_json)
+      return
+    end
+
+    node.propose(QueueCommand.new(QueueAction::Publish, name, body: body.to_slice))
+    context.response.status_code = 202
+    context.response.content_type = "application/json"
+    context.response.print({status: "accepted", queue: name}.to_json)
   end
 
   private def handle_consume(context, name : String)
@@ -212,11 +234,12 @@ class QueueHttpHandler
   end
 
   private def handle_web_ui(context)
-    context.response.content_type = "text/html"
+    context.response.headers["Content-Type"] = "text/html; charset=utf-8"
     context.response << <<-HTML
       <!doctype html>
       <html>
       <head>
+        <meta charset="utf-8">
         <title>Queue PoC</title>
         <style>
           body { font-family: -apple-system, sans-serif; margin: 2em; }
@@ -226,9 +249,14 @@ class QueueHttpHandler
           th { background: #f0f0f0; }
           .leader { color: #060; font-weight: bold; }
           .info { color: #666; font-size: 12px; }
-          form { margin-top: 1em; }
-          input { padding: 4px; }
+          fieldset { margin-top: 1em; padding: 0.75em 1em; border: 1px solid #ddd; max-width: 720px; }
+          legend { font-weight: bold; padding: 0 6px; }
+          form { margin: 0.25em 0; }
+          label { margin-right: 12px; }
+          input[type=text], input[type=number] { padding: 4px; }
           button { padding: 4px 12px; }
+          button.running { background: #fee; border-color: #c60; color: #c60; }
+          .stats { font-family: ui-monospace, monospace; color: #444; margin-left: 8px; }
         </style>
       </head>
       <body>
@@ -240,23 +268,43 @@ class QueueHttpHandler
           </thead>
           <tbody></tbody>
         </table>
-        <form id="publish-form" onsubmit="publish(); return false;">
-          <input id="qname" placeholder="queue name" required>
-          <input id="body" placeholder="message body" required>
-          <button>Publish</button>
-        </form>
-        <form id="consume-form" onsubmit="consume(); return false;">
-          <input id="qname-c" placeholder="queue name" required>
-          <button>Consume one</button>
-        </form>
-        <pre id="last-consume"></pre>
+
+        <fieldset>
+          <legend>Publish</legend>
+          <form onsubmit="publishOne(); return false;">
+            <label>Queue <input type="text" id="qname" required></label>
+            <label>Body <input type="text" id="body" required></label>
+            <button>Publish one</button>
+          </form>
+          <form onsubmit="publishMany(); return false;">
+            <label>Queue <input type="text" id="qname-bulk" required></label>
+            <label>Count <input type="number" id="count" value="100" min="1" max="1000000" required></label>
+            <button id="bulk-btn">Publish N random</button>
+            <span class="stats" id="bulk-stats"></span>
+          </form>
+        </fieldset>
+
+        <fieldset>
+          <legend>Consume</legend>
+          <form onsubmit="consumeOne(); return false;">
+            <label>Queue <input type="text" id="qname-c" required></label>
+            <button>Consume one</button>
+          </form>
+          <form onsubmit="toggleContinuous(); return false;">
+            <label>Queue <input type="text" id="qname-cc" required></label>
+            <button id="cc-btn">Start continuous</button>
+            <span class="stats" id="cc-stats"></span>
+          </form>
+          <pre id="last-consume"></pre>
+        </fieldset>
 
         <script>
+          function esc(s) { var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
           async function refresh() {
             const r = await fetch('/queues');
             const list = await r.json();
             const tbody = document.querySelector('#queues tbody');
-            function esc(s) { var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
             tbody.innerHTML = list.map(q =>
               '<tr>' +
                 '<td>' + esc(q.name) + '</td>' +
@@ -269,26 +317,91 @@ class QueueHttpHandler
             ).join('');
           }
 
-          async function publish() {
+          async function publishOne() {
             const name = document.getElementById('qname').value;
             const body = document.getElementById('body').value;
-            const r = await fetch('/queues/' + encodeURIComponent(name), {method: 'POST', body: body});
-            console.log('publish:', r.status);
+            await fetch('/queues/' + encodeURIComponent(name), {method: 'POST', body: body});
             refresh();
           }
 
-          async function consume() {
+          async function publishMany() {
+            const name = document.getElementById('qname-bulk').value;
+            const count = parseInt(document.getElementById('count').value, 10);
+            const btn = document.getElementById('bulk-btn');
+            const stats = document.getElementById('bulk-stats');
+            const url = '/queues/' + encodeURIComponent(name);
+            const concurrency = 20;
+            let next = 0, done = 0, errors = 0;
+            btn.disabled = true;
+            const started = performance.now();
+            async function worker() {
+              while (next < count) {
+                const i = next++;
+                const body = 'msg-' + i + '-' + Math.random().toString(36).slice(2, 10);
+                try {
+                  const r = await fetch(url, {method: 'POST', body: body});
+                  if (!r.ok) errors++;
+                } catch (e) { errors++; }
+                done++;
+                if (done % 25 === 0 || done === count) {
+                  stats.textContent = 'published ' + done + ' / ' + count + (errors ? ' (' + errors + ' errors)' : '');
+                }
+              }
+            }
+            await Promise.all(Array.from({length: concurrency}, worker));
+            const secs = ((performance.now() - started) / 1000).toFixed(1);
+            stats.textContent = 'done: ' + done + ' in ' + secs + 's' + (errors ? ' (' + errors + ' errors)' : '');
+            btn.disabled = false;
+            refresh();
+          }
+
+          async function consumeOne() {
             const name = document.getElementById('qname-c').value;
             const r = await fetch('/queues/' + encodeURIComponent(name) + '/messages');
             const out = document.getElementById('last-consume');
-            if (r.status === 204) {
-              out.textContent = '(empty)';
-            } else if (r.status === 200) {
-              out.textContent = await r.text();
-            } else {
-              out.textContent = 'error: ' + r.status;
-            }
+            if (r.status === 204) out.textContent = '(empty)';
+            else if (r.status === 200) out.textContent = await r.text();
+            else out.textContent = 'error: ' + r.status;
             refresh();
+          }
+
+          const cc = { running: false, count: 0 };
+          async function toggleContinuous() {
+            const btn = document.getElementById('cc-btn');
+            const stats = document.getElementById('cc-stats');
+            const out = document.getElementById('last-consume');
+            if (cc.running) {
+              cc.running = false;
+              btn.textContent = 'Start continuous';
+              btn.classList.remove('running');
+              return;
+            }
+            const name = document.getElementById('qname-cc').value;
+            cc.running = true;
+            cc.count = 0;
+            btn.textContent = 'Stop continuous';
+            btn.classList.add('running');
+            stats.textContent = 'consumed 0';
+            while (cc.running) {
+              try {
+                const r = await fetch('/queues/' + encodeURIComponent(name) + '/messages');
+                if (r.status === 200) {
+                  cc.count++;
+                  const body = await r.text();
+                  out.textContent = '#' + cc.count + ': ' + body;
+                  if (cc.count % 10 === 0) stats.textContent = 'consumed ' + cc.count;
+                } else if (r.status === 204) {
+                  stats.textContent = 'consumed ' + cc.count + ' (queue empty)';
+                  await new Promise(r => setTimeout(r, 200));
+                } else {
+                  stats.textContent = 'consumed ' + cc.count + ' (status ' + r.status + ')';
+                  await new Promise(r => setTimeout(r, 500));
+                }
+              } catch (e) {
+                await new Promise(r => setTimeout(r, 500));
+              }
+            }
+            stats.textContent = 'stopped after ' + cc.count;
           }
 
           refresh();
@@ -299,21 +412,28 @@ class QueueHttpHandler
     HTML
   end
 
-  private def forward_to_leader(context, node : Raft::Node(QueueCommand)) : Bool
+  private def forward_to_leader(context, node : Raft::Node(QueueCommand), body : String? = nil) : Bool
     leader_id = node.leader_id
     return false unless leader_id
+
+    host = nil
     peer = node.peers.find { |p| p.id == leader_id }
-    return false unless peer && !peer.address.empty?
-    host = peer.address.split(":").first
+    if peer && !peer.address.empty?
+      host = peer.address.split(":").first
+    elsif addr = @transport.peer_address?(leader_id)
+      host = addr[0]
+    end
+    return false unless host
+
     http_port = 8000 + leader_id
     begin
       client = ::HTTP::Client.new(host, http_port.to_i)
       client.connect_timeout = 2.seconds
       client.read_timeout = 5.seconds
-      body = context.request.body.try(&.gets_to_end)
+      forward_body = body || context.request.body.try(&.gets_to_end)
       query = context.request.query
       resource = query ? "#{context.request.path}?#{query}" : context.request.path
-      response = client.exec(context.request.method, resource, context.request.headers, body)
+      response = client.exec(context.request.method, resource, context.request.headers, forward_body)
       context.response.status_code = response.status_code
       context.response.content_type = response.content_type || "application/json"
       context.response.print response.body

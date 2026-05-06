@@ -113,7 +113,7 @@ end
 transport.start
 
 raft_handler = Raft::HTTP::Handler(QueueCommand).new(meta_node, transport, raft_advertise_address)
-queue_handler = QueueHttpHandler.new(meta_node, meta_sm, nodes, state_machines)
+queue_handler = QueueHttpHandler.new(meta_node, meta_sm, nodes, state_machines, transport)
 
 server = ::HTTP::Server.new([queue_handler, raft_handler]) do |context|
   context.response.status_code = 404
