@@ -796,6 +796,7 @@ module Raft
       tmp_path = path + ".tmp"
       File.open(tmp_path, "wb") do |f|
         f.write_bytes(@current_term, IO::ByteFormat::LittleEndian)
+        f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
         if vf = @voted_for
           f.write_bytes(1_u8, IO::ByteFormat::LittleEndian)
           f.write_bytes(vf, IO::ByteFormat::LittleEndian)
@@ -817,11 +818,16 @@ module Raft
       return unless File.exists?(path)
       File.open(path, "rb") do |f|
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
         peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
         # raft_meta peers may be more recent than the snapshot's; prefer raft_meta.
         @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
+      end
+      # Replay any committed log entries past the snapshot
+      if @commit_index > @last_applied
+        apply_entries(@last_applied + 1, @commit_index)
       end
     end
 
