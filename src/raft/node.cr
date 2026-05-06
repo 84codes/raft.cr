@@ -32,6 +32,7 @@ module Raft
     @pre_votes_received : Set(NodeID) = Set(NodeID).new
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
+    @snapshot_send_offset : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @on_configuration_change : Proc(Array(Peer), Nil)?
     @on_configuration_applied : Proc(Array(Peer), Nil)?
     @pending_config_index : UInt64 = 0_u64
@@ -565,6 +566,10 @@ module Raft
 
     private def send_append_entries_to(peer_id : NodeID)
       next_idx = @next_index.fetch(peer_id, @log.last_index + 1)
+      if @snapshot_index > 0 && next_idx <= @snapshot_index
+        send_install_snapshot_to(peer_id)
+        return
+      end
       prev_log_index = next_idx - 1
       prev_log_term = prev_log_index > 0 ? @log.term_at(prev_log_index) : 0_u64
 
@@ -591,6 +596,38 @@ module Raft
       @metrics.try(&.increment("raft_messages_sent_total"))
       @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
       @metrics.try(&.increment("raft_log_entries_sent_total", by: entries_count.to_i64)) if entries_count > 0
+    end
+
+    private def send_install_snapshot_to(peer_id : NodeID)
+      path = File.join(@config.data_dir, "snapshot")
+      return unless File.exists?(path)
+
+      offset = @snapshot_send_offset.fetch(peer_id, 0_u64)
+      total_size = File.size(path).to_u64
+      chunk_size = @config.snapshot_chunk_size.to_u64
+      remaining = total_size - offset
+      this_chunk = Math.min(remaining, chunk_size)
+      is_last = (offset + this_chunk) >= total_size
+
+      buf = Bytes.new(this_chunk.to_i32)
+      File.open(path, "rb") do |f|
+        f.seek(offset.to_i64)
+        f.read_fully(buf)
+      end
+
+      @outbox << {peer_id, Message.new(
+        group_id: @group_id,
+        type: MessageType::InstallSnapshot,
+        from: @id,
+        term: @current_term,
+        prev_log_index: @snapshot_index,
+        prev_log_term: @snapshot_term,
+        last_log_index: offset,
+        last_log_term: total_size,
+        success: is_last,
+        entries_data: buf,
+      )}
+      @metrics.try(&.increment("raft_install_snapshot_sent_total"))
     end
 
     private def handle_pre_vote(msg : Message)
