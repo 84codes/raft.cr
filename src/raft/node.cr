@@ -7,6 +7,8 @@ module Raft
     getter leader_id : NodeID? = nil
     getter commit_index : UInt64 = 0_u64
     getter last_applied : UInt64 = 0_u64
+    getter snapshot_index : UInt64 = 0_u64
+    getter snapshot_term : UInt64 = 0_u64
     getter log : Log(T)
 
     getter peers : Array(Peer)
@@ -741,6 +743,50 @@ module Raft
       @on_configuration_applied.try(&.call(@peers))
     end
 
+    # Test helper — drives persist_snapshot from outside while
+    # take_snapshot doesn't exist yet (added in Task 3).
+    def persist_snapshot_for_test(index : UInt64, term : UInt64)
+      persist_snapshot(index, term)
+    end
+
+    private def persist_snapshot(index : UInt64, term : UInt64)
+      path = File.join(@config.data_dir, "snapshot")
+      tmp_path = path + ".tmp"
+
+      File.open(tmp_path, "wb") do |f|
+        f.write_bytes(index, IO::ByteFormat::LittleEndian)
+        f.write_bytes(term, IO::ByteFormat::LittleEndian)
+        peer_bytes = serialize_peers
+        f.write_bytes(peer_bytes.size.to_u32, IO::ByteFormat::LittleEndian)
+        f.write(peer_bytes)
+        @state_machine.snapshot(f)
+        f.fsync
+      end
+      File.rename(tmp_path, path)
+
+      @snapshot_index = index
+      @snapshot_term = term
+    end
+
+    private def load_snapshot : Bool
+      path = File.join(@config.data_dir, "snapshot")
+      return false unless File.exists?(path)
+
+      File.open(path, "rb") do |f|
+        @snapshot_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        @snapshot_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        peer_len = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        peer_buf = Bytes.new(peer_len)
+        f.read_fully(peer_buf)
+        @peers = deserialize_peers(peer_buf)
+        @state_machine.restore(f)
+      end
+
+      @last_applied = @snapshot_index
+      @commit_index = Math.max(@commit_index, @snapshot_index)
+      true
+    end
+
     private def random_election_timeout : UInt32
       @random.rand(@config.election_timeout_min_ticks..@config.election_timeout_max_ticks)
     end
@@ -764,9 +810,9 @@ module Raft
     end
 
     private def recover_state
+      load_snapshot
       path = File.join(@config.data_dir, "raft_meta")
       tmp_path = path + ".tmp"
-      # Clean up leftover temp file from a crash during persist_state
       File.delete(tmp_path) if File.exists?(tmp_path)
       return unless File.exists?(path)
       File.open(path, "rb") do |f|
@@ -774,6 +820,7 @@ module Raft
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
         peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        # raft_meta peers may be more recent than the snapshot's; prefer raft_meta.
         @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
       end
     end
