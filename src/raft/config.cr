@@ -11,6 +11,7 @@ module Raft
     property snapshot_chunk_size : UInt32 = 1024_u32 * 1024_u32 # 1 MB
     property max_append_entries_size : UInt32 = 1_u32 * 1024_u32 * 1024_u32 # 1 MB
     property max_message_payload_bytes : UInt32 = 64_u32 * 1024_u32 * 1024_u32 # 64 MB
+    property snapshot_interval_entries : UInt64 = 1000_u64
 
     def initialize
     end

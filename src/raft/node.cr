@@ -501,6 +501,10 @@ module Raft
           @last_applied = i
         end
       end
+      if @snapshot_index < @last_applied &&
+         @last_applied - @snapshot_index >= @config.snapshot_interval_entries
+        take_snapshot
+      end
     end
 
     private def handle_request_vote(msg : Message)
@@ -747,6 +751,13 @@ module Raft
     # take_snapshot doesn't exist yet (added in Task 3).
     def persist_snapshot_for_test(index : UInt64, term : UInt64)
       persist_snapshot(index, term)
+    end
+
+    private def take_snapshot
+      return if @last_applied <= @snapshot_index
+      term = @log.term_at(@last_applied)
+      persist_snapshot(@last_applied, term)
+      @metrics.try(&.increment("raft_snapshots_taken_total"))
     end
 
     private def persist_snapshot(index : UInt64, term : UInt64)

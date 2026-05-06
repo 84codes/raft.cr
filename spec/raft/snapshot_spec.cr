@@ -29,6 +29,27 @@ describe "Raft::Node snapshot persistence" do
   end
 end
 
+describe "Raft::Node snapshot trigger" do
+  it "snapshots after snapshot_interval_entries entries have been applied" do
+    dir = File.tempname("raft_snapshot_trigger")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.snapshot_interval_entries = 5_u64
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.bootstrap
+    7.times { |i| node.propose(TestData.new("v#{i}")) }
+
+    node.snapshot_index.should be >= 5_u64
+    File.exists?(File.join(dir, "snapshot")).should be_true
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end
+
 describe "Raft::Node snapshot + log tail recovery" do
   it "applies snapshot then replays only entries past snapshot_index" do
     dir = File.tempname("raft_snapshot_tail")
