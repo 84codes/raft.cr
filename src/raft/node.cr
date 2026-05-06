@@ -757,6 +757,7 @@ module Raft
       return if @last_applied <= @snapshot_index
       term = @log.term_at(@last_applied)
       persist_snapshot(@last_applied, term)
+      @log.truncate_before(@snapshot_index)
       @metrics.try(&.increment("raft_snapshots_taken_total"))
     end
 

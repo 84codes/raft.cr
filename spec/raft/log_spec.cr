@@ -228,4 +228,26 @@ describe Raft::Log do
     log.close
     FileUtils.rm_rf(dir)
   end
+
+  it "truncate_before drops segments whose last_index <= given index" do
+    dir = File.tempname("raft_log_truncate_before")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.max_segment_size = 80_u32 # tiny — forces frequent rotation
+
+    log = Raft::Log(TestData).new(cfg)
+    20.times { |i| log.append(term: 1_u64, data: TestData.new("v#{i}")) }
+    initial_segments = log.segment_count
+    initial_segments.should be > 1
+
+    # Drop everything up to (and including) entry index 10
+    log.truncate_before(10_u64)
+    log.segment_count.should be < initial_segments
+    log.first_index.should be >= 11_u64
+    log.get(20_u64).data.not_nil!.value.should eq "v19"
+
+    log.close
+    FileUtils.rm_rf(dir)
+  end
 end

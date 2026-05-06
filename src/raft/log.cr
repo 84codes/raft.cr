@@ -60,6 +60,22 @@ module Raft
       @segments.size
     end
 
+    def first_index : UInt64
+      return 0_u64 if @segments.empty?
+      @segments.first.first_index
+    end
+
+    def truncate_before(index : UInt64)
+      # Drop segments whose entire index range is <= the given index.
+      # The segment containing `index` itself is kept (we don't split segments).
+      while @segments.size > 1 && @segments.first.last_index <= index
+        seg = @segments.shift
+        path = File.join(@config.data_dir, "%016d.log" % seg.first_index)
+        seg.close
+        File.delete(path) if File.exists?(path)
+      end
+    end
+
     def reset
       @segments.each(&.close)
       @segments.clear

@@ -83,3 +83,27 @@ describe "Raft::Node snapshot + log tail recovery" do
     FileUtils.rm_rf(dir)
   end
 end
+
+describe "Raft::Node log compaction after snapshot" do
+  it "drops log segments whose last index is at or below snapshot_index" do
+    dir = File.tempname("raft_snapshot_compact")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.snapshot_interval_entries = 5_u64
+    cfg.max_segment_size = 60_u32 # tiny — forces multi-segment
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.bootstrap
+    20.times { |i| node.propose(TestData.new("v#{i}")) }
+
+    # After 20 entries with snapshot every 5, snapshot_index should be ~15+.
+    node.snapshot_index.should be >= 15_u64
+    # The first segment should now start past index 1.
+    node.log.first_index.should be > 1_u64
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end
