@@ -107,3 +107,60 @@ describe "Raft::Node log compaction after snapshot" do
     FileUtils.rm_rf(dir)
   end
 end
+
+describe "Raft::Node InstallSnapshot receive" do
+  it "follower restores from chunked snapshot and resets log" do
+    dir = File.tempname("raft_install_snapshot")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+
+    # Build a "leader" snapshot file manually using the same framing as persist_snapshot:
+    # [u64 index][u64 term][u32 peer_len][peers][sm_bytes]
+    fake_body = IO::Memory.new
+    fake_body.write_bytes(42_u64, IO::ByteFormat::LittleEndian)  # snapshot_index
+    fake_body.write_bytes(1_u64, IO::ByteFormat::LittleEndian)   # snapshot_term
+    fake_body.write_bytes(4_u32, IO::ByteFormat::LittleEndian)   # peer_len (just the u32 count below)
+    fake_body.write_bytes(0_u32, IO::ByteFormat::LittleEndian)   # 0 peers
+    sm_seed = TestStateMachine.new
+    sm_seed.apply(TestData.new("x"))
+    sm_seed.apply(TestData.new("y"))
+    sm_seed.apply(TestData.new("z"))
+    sm_seed.snapshot(fake_body)
+    body_bytes = fake_body.to_slice
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 2_u64, peers: [1_u64], config: cfg, state_machine: sm)
+
+    # Single-chunk install
+    msg = Raft::Message.new(
+      type: Raft::MessageType::InstallSnapshot,
+      from: 1_u64,
+      term: 1_u64,
+      prev_log_index: 42_u64,        # snapshot_index
+      prev_log_term: 1_u64,          # snapshot_term
+      last_log_index: 0_u64,         # chunk offset
+      last_log_term: body_bytes.size.to_u64, # total size
+      success: true,                 # is_last_chunk
+      entries_data: body_bytes,
+    )
+    node.step(msg)
+
+    node.snapshot_index.should eq 42_u64
+    node.snapshot_term.should eq 1_u64
+    node.last_applied.should eq 42_u64
+    node.commit_index.should eq 42_u64
+    sm.applied.map(&.value).should eq ["x", "y", "z"]
+
+    # Should have emitted an InstallSnapshotResponse with success=true
+    out = node.take_messages
+    out.size.should eq 1
+    out[0][0].should eq 1_u64
+    out[0][1].type.should eq Raft::MessageType::InstallSnapshotResponse
+    out[0][1].success.should be_true
+    out[0][1].last_log_index.should eq body_bytes.size.to_u64
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end

@@ -144,6 +144,10 @@ module Raft
         handle_pre_vote_response(message)
       when MessageType::TimeoutNow
         handle_timeout_now(message)
+      when MessageType::InstallSnapshot
+        handle_install_snapshot(message)
+      when MessageType::InstallSnapshotResponse
+        handle_install_snapshot_response(message)
       end
     end
 
@@ -628,6 +632,85 @@ module Raft
         entries_data: buf,
       )}
       @metrics.try(&.increment("raft_install_snapshot_sent_total"))
+    end
+
+    private def handle_install_snapshot(msg : Message)
+      if msg.term < @current_term
+        @outbox << {msg.from, Message.new(
+          type: MessageType::InstallSnapshotResponse,
+          from: @id,
+          term: @current_term,
+          success: false,
+          last_log_index: 0_u64,
+        )}
+        return
+      end
+
+      if msg.term > @current_term
+        @current_term = msg.term
+        @voted_for = nil
+      end
+      become_follower(msg.from)
+      @election_tick = 0_u32
+
+      tmp_path = File.join(@config.data_dir, "snapshot.tmp")
+      mode = msg.last_log_index == 0_u64 ? "wb" : "ab"
+      File.open(tmp_path, mode) do |f|
+        f.write(msg.entries_data)
+        f.fsync
+      end
+
+      bytes_received = msg.last_log_index + msg.entries_data.size.to_u64
+
+      if msg.success
+        # Last chunk — atomic rename, then load the snapshot in the same code path
+        # that startup uses (reads index/term/peers/sm from the leading bytes of the file).
+        path = File.join(@config.data_dir, "snapshot")
+        File.rename(tmp_path, path)
+        load_snapshot
+
+        # Sanity-check: the prefix the leader sent (in Message header) should match
+        # what we just loaded from the file. If they diverge, the file is corrupt.
+        if @snapshot_index != msg.prev_log_index || @snapshot_term != msg.prev_log_term
+          raise "InstallSnapshot: header (#{msg.prev_log_index}, #{msg.prev_log_term}) != body (#{@snapshot_index}, #{@snapshot_term})"
+        end
+
+        @log.reset
+        @last_applied = @snapshot_index
+        @commit_index = @snapshot_index
+        persist_state
+      end
+
+      @outbox << {msg.from, Message.new(
+        type: MessageType::InstallSnapshotResponse,
+        from: @id,
+        term: @current_term,
+        success: true,
+        last_log_index: bytes_received,
+      )}
+    end
+
+    private def handle_install_snapshot_response(msg : Message)
+      return unless @role == Role::Leader
+      if msg.term > @current_term
+        @current_term = msg.term
+        @voted_for = nil
+        become_follower
+        return
+      end
+      return unless msg.success
+
+      path = File.join(@config.data_dir, "snapshot")
+      total_size = File.exists?(path) ? File.size(path).to_u64 : 0_u64
+
+      if msg.last_log_index >= total_size
+        # Follower has the full snapshot — fast-forward its next_index past the snapshot.
+        @next_index[msg.from] = @snapshot_index + 1
+        @match_index[msg.from] = @snapshot_index
+        @snapshot_send_offset.delete(msg.from)
+      else
+        @snapshot_send_offset[msg.from] = msg.last_log_index
+      end
     end
 
     private def handle_pre_vote(msg : Message)
