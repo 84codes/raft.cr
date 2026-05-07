@@ -7,6 +7,8 @@ module Raft
     getter leader_id : NodeID? = nil
     getter commit_index : UInt64 = 0_u64
     getter last_applied : UInt64 = 0_u64
+    getter snapshot_index : UInt64 = 0_u64
+    getter snapshot_term : UInt64 = 0_u64
     getter log : Log(T)
 
     getter peers : Array(Peer)
@@ -30,6 +32,7 @@ module Raft
     @pre_votes_received : Set(NodeID) = Set(NodeID).new
     @next_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @match_index : Hash(NodeID, UInt64) = {} of NodeID => UInt64
+    @snapshot_send_offset : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @on_configuration_change : Proc(Array(Peer), Nil)?
     @on_configuration_applied : Proc(Array(Peer), Nil)?
     @pending_config_index : UInt64 = 0_u64
@@ -141,6 +144,10 @@ module Raft
         handle_pre_vote_response(message)
       when MessageType::TimeoutNow
         handle_timeout_now(message)
+      when MessageType::InstallSnapshot
+        handle_install_snapshot(message)
+      when MessageType::InstallSnapshotResponse
+        handle_install_snapshot_response(message)
       end
     end
 
@@ -370,27 +377,45 @@ module Raft
 
       # Check prev_log consistency
       if msg.prev_log_index > 0
-        if msg.prev_log_index > @log.last_index
-          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "log_gap"}))
-          @outbox << {msg.from, Message.new(
-            type: MessageType::AppendEntriesResponse,
-            from: @id,
-            term: @current_term,
-            success: false,
-            reject_hint: @log.last_index,
-          )}
-          return
-        end
-        if @log.term_at(msg.prev_log_index) != msg.prev_log_term
-          @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
-          @outbox << {msg.from, Message.new(
-            type: MessageType::AppendEntriesResponse,
-            from: @id,
-            term: @current_term,
-            success: false,
-            reject_hint: msg.prev_log_index - 1,
-          )}
-          return
+        if msg.prev_log_index < @snapshot_index
+          # Fully covered by snapshot; nothing to verify locally.
+        elsif msg.prev_log_index == @snapshot_index && @snapshot_index > 0
+          # At the snapshot boundary — verify the term matches the snapshot's term.
+          if msg.prev_log_term != @snapshot_term
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: msg.prev_log_index - 1,
+            )}
+            return
+          end
+        else
+          # prev_log_index > @snapshot_index — use the log.
+          if msg.prev_log_index > @log.last_index
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "log_gap"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: @log.last_index,
+            )}
+            return
+          end
+          if @log.term_at(msg.prev_log_index) != msg.prev_log_term
+            @metrics.try(&.increment("raft_append_entries_rejected_total", {"reason" => "term_mismatch"}))
+            @outbox << {msg.from, Message.new(
+              type: MessageType::AppendEntriesResponse,
+              from: @id,
+              term: @current_term,
+              success: false,
+              reject_hint: msg.prev_log_index - 1,
+            )}
+            return
+          end
         end
       end
 
@@ -424,7 +449,7 @@ module Raft
         apply_entries(@commit_index + 1, new_commit)
         # If we were removed and log was reset by apply_configuration, skip the update
         unless @peers.empty? && @log.last_index == 0_u64
-          @commit_index = new_commit
+          @commit_index = Math.max(@commit_index, new_commit)
           @metrics.try(&.increment("raft_commit_advances_total"))
           persist_state
         end
@@ -499,6 +524,10 @@ module Raft
           @last_applied = i
         end
       end
+      if @snapshot_index < @last_applied &&
+         @last_applied - @snapshot_index >= @config.snapshot_interval_entries
+        take_snapshot
+      end
     end
 
     private def handle_request_vote(msg : Message)
@@ -559,6 +588,10 @@ module Raft
 
     private def send_append_entries_to(peer_id : NodeID)
       next_idx = @next_index.fetch(peer_id, @log.last_index + 1)
+      if @snapshot_index > 0 && next_idx <= @snapshot_index
+        send_install_snapshot_to(peer_id)
+        return
+      end
       prev_log_index = next_idx - 1
       prev_log_term = prev_log_index > 0 ? @log.term_at(prev_log_index) : 0_u64
 
@@ -585,6 +618,117 @@ module Raft
       @metrics.try(&.increment("raft_messages_sent_total"))
       @metrics.try(&.increment("raft_heartbeats_sent_total")) if entries_count == 0
       @metrics.try(&.increment("raft_log_entries_sent_total", by: entries_count.to_i64)) if entries_count > 0
+    end
+
+    private def send_install_snapshot_to(peer_id : NodeID)
+      path = File.join(@config.data_dir, "snapshot")
+      return unless File.exists?(path)
+
+      offset = @snapshot_send_offset.fetch(peer_id, 0_u64)
+      total_size = File.size(path).to_u64
+      chunk_size = @config.snapshot_chunk_size.to_u64
+      remaining = total_size - offset
+      this_chunk = Math.min(remaining, chunk_size)
+      is_last = (offset + this_chunk) >= total_size
+
+      buf = Bytes.new(this_chunk.to_i32)
+      File.open(path, "rb") do |f|
+        f.seek(offset.to_i64)
+        f.read_fully(buf)
+      end
+
+      @outbox << {peer_id, Message.new(
+        group_id: @group_id,
+        type: MessageType::InstallSnapshot,
+        from: @id,
+        term: @current_term,
+        prev_log_index: @snapshot_index,
+        prev_log_term: @snapshot_term,
+        last_log_index: offset,
+        last_log_term: total_size,
+        success: is_last,
+        entries_data: buf,
+      )}
+      @metrics.try(&.increment("raft_install_snapshot_sent_total"))
+    end
+
+    private def handle_install_snapshot(msg : Message)
+      if msg.term < @current_term
+        @outbox << {msg.from, Message.new(
+          type: MessageType::InstallSnapshotResponse,
+          from: @id,
+          term: @current_term,
+          success: false,
+          last_log_index: 0_u64,
+        )}
+        return
+      end
+
+      if msg.term > @current_term
+        @current_term = msg.term
+        @voted_for = nil
+      end
+      become_follower(msg.from)
+      @election_tick = 0_u32
+
+      tmp_path = File.join(@config.data_dir, "snapshot.tmp")
+      mode = msg.last_log_index == 0_u64 ? "wb" : "ab"
+      File.open(tmp_path, mode) do |f|
+        f.write(msg.entries_data)
+        f.fsync
+      end
+
+      bytes_received = msg.last_log_index + msg.entries_data.size.to_u64
+
+      if msg.success
+        # Last chunk — atomic rename, then load the snapshot in the same code path
+        # that startup uses (reads index/term/peers/sm from the leading bytes of the file).
+        path = File.join(@config.data_dir, "snapshot")
+        File.rename(tmp_path, path)
+        load_snapshot
+
+        # Sanity-check: the prefix the leader sent (in Message header) should match
+        # what we just loaded from the file. If they diverge, the file is corrupt.
+        if @snapshot_index != msg.prev_log_index || @snapshot_term != msg.prev_log_term
+          raise "InstallSnapshot: header (#{msg.prev_log_index}, #{msg.prev_log_term}) != body (#{@snapshot_index}, #{@snapshot_term})"
+        end
+
+        @log.reset_to(@snapshot_index)
+        @last_applied = @snapshot_index
+        @commit_index = @snapshot_index
+        persist_state
+      end
+
+      @outbox << {msg.from, Message.new(
+        type: MessageType::InstallSnapshotResponse,
+        from: @id,
+        term: @current_term,
+        success: true,
+        last_log_index: bytes_received,
+      )}
+    end
+
+    private def handle_install_snapshot_response(msg : Message)
+      return unless @role == Role::Leader
+      if msg.term > @current_term
+        @current_term = msg.term
+        @voted_for = nil
+        become_follower
+        return
+      end
+      return unless msg.success
+
+      path = File.join(@config.data_dir, "snapshot")
+      total_size = File.exists?(path) ? File.size(path).to_u64 : 0_u64
+
+      if msg.last_log_index >= total_size
+        # Follower has the full snapshot — fast-forward its next_index past the snapshot.
+        @next_index[msg.from] = @snapshot_index + 1
+        @match_index[msg.from] = @snapshot_index
+        @snapshot_send_offset.delete(msg.from)
+      else
+        @snapshot_send_offset[msg.from] = msg.last_log_index
+      end
     end
 
     private def handle_pre_vote(msg : Message)
@@ -741,6 +885,58 @@ module Raft
       @on_configuration_applied.try(&.call(@peers))
     end
 
+    # Test helper — drives persist_snapshot from outside while
+    # take_snapshot doesn't exist yet (added in Task 3).
+    def persist_snapshot_for_test(index : UInt64, term : UInt64)
+      persist_snapshot(index, term)
+    end
+
+    private def take_snapshot
+      return if @last_applied <= @snapshot_index
+      term = @log.term_at(@last_applied)
+      persist_snapshot(@last_applied, term)
+      @log.truncate_before(@snapshot_index)
+      @metrics.try(&.increment("raft_snapshots_taken_total"))
+    end
+
+    private def persist_snapshot(index : UInt64, term : UInt64)
+      path = File.join(@config.data_dir, "snapshot")
+      tmp_path = path + ".tmp"
+
+      File.open(tmp_path, "wb") do |f|
+        f.write_bytes(index, IO::ByteFormat::LittleEndian)
+        f.write_bytes(term, IO::ByteFormat::LittleEndian)
+        peer_bytes = serialize_peers
+        f.write_bytes(peer_bytes.size.to_u32, IO::ByteFormat::LittleEndian)
+        f.write(peer_bytes)
+        @state_machine.snapshot(f)
+        f.fsync
+      end
+      File.rename(tmp_path, path)
+
+      @snapshot_index = index
+      @snapshot_term = term
+    end
+
+    private def load_snapshot : Bool
+      path = File.join(@config.data_dir, "snapshot")
+      return false unless File.exists?(path)
+
+      File.open(path, "rb") do |f|
+        @snapshot_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        @snapshot_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        peer_len = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        peer_buf = Bytes.new(peer_len)
+        f.read_fully(peer_buf)
+        @peers = deserialize_peers(peer_buf)
+        @state_machine.restore(f)
+      end
+
+      @last_applied = @snapshot_index
+      @commit_index = Math.max(@commit_index, @snapshot_index)
+      true
+    end
+
     private def random_election_timeout : UInt32
       @random.rand(@config.election_timeout_min_ticks..@config.election_timeout_max_ticks)
     end
@@ -750,6 +946,7 @@ module Raft
       tmp_path = path + ".tmp"
       File.open(tmp_path, "wb") do |f|
         f.write_bytes(@current_term, IO::ByteFormat::LittleEndian)
+        f.write_bytes(@commit_index, IO::ByteFormat::LittleEndian)
         if vf = @voted_for
           f.write_bytes(1_u8, IO::ByteFormat::LittleEndian)
           f.write_bytes(vf, IO::ByteFormat::LittleEndian)
@@ -764,17 +961,23 @@ module Raft
     end
 
     private def recover_state
+      load_snapshot
       path = File.join(@config.data_dir, "raft_meta")
       tmp_path = path + ".tmp"
-      # Clean up leftover temp file from a crash during persist_state
       File.delete(tmp_path) if File.exists?(tmp_path)
       return unless File.exists?(path)
       File.open(path, "rb") do |f|
         @current_term = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+        @commit_index = f.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
         has_vote = f.read_bytes(UInt8, IO::ByteFormat::LittleEndian)
         @voted_for = has_vote == 1_u8 ? f.read_bytes(UInt64, IO::ByteFormat::LittleEndian) : nil
         peer_count = f.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        # raft_meta peers may be more recent than the snapshot's; prefer raft_meta.
         @peers = Array(Peer).new(peer_count) { Peer.from_io(f) }
+      end
+      # Replay any committed log entries past the snapshot
+      if @commit_index > @last_applied
+        apply_entries(@last_applied + 1, @commit_index)
       end
     end
 

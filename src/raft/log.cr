@@ -60,6 +60,22 @@ module Raft
       @segments.size
     end
 
+    def first_index : UInt64
+      return 0_u64 if @segments.empty?
+      @segments.first.first_index
+    end
+
+    def truncate_before(index : UInt64)
+      # Drop segments whose entire index range is <= the given index.
+      # The segment containing `index` itself is kept (we don't split segments).
+      while @segments.size > 1 && @segments.first.last_index <= index
+        seg = @segments.shift
+        path = File.join(@config.data_dir, "%016d.log" % seg.first_index)
+        seg.close
+        File.delete(path) if File.exists?(path)
+      end
+    end
+
     def reset
       @segments.each(&.close)
       @segments.clear
@@ -68,6 +84,17 @@ module Raft
       @last_index = 0_u64
       @last_term = 0_u64
       new_segment(1_u64)
+    end
+
+    # Reset the log to a specific index, as after installing a snapshot.
+    # After this call, @last_index == index and the next append produces index + 1.
+    def reset_to(index : UInt64)
+      @segments.each(&.close)
+      @segments.clear
+      Dir.glob(File.join(@config.data_dir, "*.log")) { |f| File.delete(f) }
+      @last_index = index
+      @last_term = 0_u64
+      new_segment(index + 1_u64)
     end
 
     def close

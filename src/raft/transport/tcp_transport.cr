@@ -15,6 +15,7 @@ module Raft
     @commands : Channel(TransportCommand) = Channel(TransportCommand).new(64)
     @outbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
     @inbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
+    @max_payload : UInt32
 
     private abstract struct TransportCommand
     end
@@ -43,7 +44,7 @@ module Raft
       end
     end
 
-    def initialize(@listen_address : String, @listen_port : Int32, @data_dir : String? = nil)
+    def initialize(@listen_address : String, @listen_port : Int32, @data_dir : String? = nil, @max_payload : UInt32 = 64_u32 * 1024_u32 * 1024_u32)
       recover_peers
     end
 
@@ -183,7 +184,7 @@ module Raft
     private def handle_connection(client : TCPSocket)
       client.tcp_nodelay = true
       while @running
-        msg = Message.from_io(client)
+        msg = Message.from_io(client, @max_payload)
         if ch = @channels[msg.group_id]?
           select
           when ch.send(msg)

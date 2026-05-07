@@ -22,7 +22,7 @@ describe Raft::Message do
     io = IO::Memory.new
     msg.to_io(io)
     io.rewind
-    restored = Raft::Message.from_io(io)
+    restored = Raft::Message.from_io(io, 64_u32 * 1024_u32 * 1024_u32)
 
     restored.protocol_version.should eq 1_u8
     restored.group_id.should eq 42_u64
@@ -46,7 +46,7 @@ describe Raft::Message do
     io = IO::Memory.new
     msg.to_io(io)
     io.rewind
-    restored = Raft::Message.from_io(io)
+    restored = Raft::Message.from_io(io, 64_u32 * 1024_u32 * 1024_u32)
 
     restored.type.should eq Raft::MessageType::RequestVote
     restored.last_log_index.should eq 5_u64
@@ -66,33 +66,34 @@ describe Raft::Message do
     io = IO::Memory.new
     msg.to_io(io)
     io.rewind
-    restored = Raft::Message.from_io(io)
+    restored = Raft::Message.from_io(io, 64_u32 * 1024_u32 * 1024_u32)
 
     restored.entries_count.should eq 1_u32
     restored.entries_data.should eq data
   end
 
   it "rejects oversized entries_data in from_io" do
+    max_payload = 64_u32 * 1024_u32 * 1024_u32
     io = IO::Memory.new
     # Write a valid message header manually
-    io.write_bytes(1_u8, IO::ByteFormat::LittleEndian)                                          # protocol_version
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # group_id
-    io.write_bytes(Raft::MessageType::AppendEntries.value, IO::ByteFormat::LittleEndian)        # type
-    io.write_bytes(1_u64, IO::ByteFormat::LittleEndian)                                         # from
-    io.write_bytes(1_u64, IO::ByteFormat::LittleEndian)                                         # term
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # prev_log_index
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # prev_log_term
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # commit_index
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # last_log_index
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # last_log_term
-    io.write_bytes(0_u8, IO::ByteFormat::LittleEndian)                                          # success
-    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                         # reject_hint
-    io.write_bytes(1_u32, IO::ByteFormat::LittleEndian)                                         # entries_count
-    io.write_bytes(Raft::Message::MAX_ENTRIES_DATA_SIZE + 1_u32, IO::ByteFormat::LittleEndian)  # data_size (oversized)
+    io.write_bytes(1_u8, IO::ByteFormat::LittleEndian)                                   # protocol_version
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # group_id
+    io.write_bytes(Raft::MessageType::AppendEntries.value, IO::ByteFormat::LittleEndian) # type
+    io.write_bytes(1_u64, IO::ByteFormat::LittleEndian)                                  # from
+    io.write_bytes(1_u64, IO::ByteFormat::LittleEndian)                                  # term
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # prev_log_index
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # prev_log_term
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # commit_index
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # last_log_index
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # last_log_term
+    io.write_bytes(0_u8, IO::ByteFormat::LittleEndian)                                   # success
+    io.write_bytes(0_u64, IO::ByteFormat::LittleEndian)                                  # reject_hint
+    io.write_bytes(1_u32, IO::ByteFormat::LittleEndian)                                  # entries_count
+    io.write_bytes(max_payload + 1_u32, IO::ByteFormat::LittleEndian)                    # data_size (oversized)
     io.rewind
 
-    expect_raises(IO::Error, /exceeds maximum/) do
-      Raft::Message.from_io(io)
+    expect_raises(IO::Error, /exceeds max_message_payload_bytes/) do
+      Raft::Message.from_io(io, max_payload)
     end
   end
 
@@ -107,7 +108,7 @@ describe Raft::Message do
     io = IO::Memory.new
     msg.to_io(io)
     io.rewind
-    restored = Raft::Message.from_io(io)
+    restored = Raft::Message.from_io(io, 64_u32 * 1024_u32 * 1024_u32)
 
     restored.type.should eq Raft::MessageType::RequestVoteResponse
     restored.success.should eq true

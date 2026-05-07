@@ -4,7 +4,7 @@
 
 **Goal:** Wire `StateMachine#snapshot`/`restore` into `Raft::Node`, persist snapshots atomically on disk, truncate the log past the snapshot index, send/receive `InstallSnapshot` to bring lagging followers back online, and recover from snapshot on restart. Closes `ARCHITECTURE.md` §6.5's "snapshots / log compaction" gap.
 
-**Architecture:** Each node persists a per-group `snapshot.meta` (small header — index, term, peers) and `snapshot.body` (SM bytes), atomic via tmp+rename+fsync. Leader takes a snapshot whenever `last_applied - snapshot_index >= snapshot_interval_entries`, then drops Raft log segments whose last index ≤ `snapshot_index`. Followers whose `next_index ≤ snapshot_index` receive `InstallSnapshot` chunks (Message fields repurposed) instead of `AppendEntries`; on the last chunk they atomically swap snapshot files, call `restore`, reset their log, and ack. On startup, `recover_state` loads the snapshot first, then replays the log tail.
+**Architecture:** Each node persists a per-group single `snapshot` file (`[u64 index][u64 term][u32 peer_len][peers][sm_bytes]`), atomic via tmp+rename+fsync. Leader takes a snapshot whenever `last_applied - snapshot_index >= snapshot_interval_entries`, then drops Raft log segments whose last index ≤ `snapshot_index`. Followers whose `next_index ≤ snapshot_index` receive `InstallSnapshot` chunks (Message fields repurposed) instead of `AppendEntries`; on the last chunk they atomically swap snapshot files, call `restore`, reset their log, and ack. On startup, `recover_state` loads the snapshot first, then replays the log tail.
 
 **Tech Stack:** Crystal, the existing `Raft::*` library, `-Dpreview_mt -Dexecution_context`. No external deps.
 
@@ -142,7 +142,7 @@ git commit -m "Move message payload cap from constant to Config.max_message_payl
 - Modify: `src/raft/node.cr` (add `@snapshot_index`, `@snapshot_term`, `persist_snapshot`, `load_snapshot`, update `recover_state`)
 - Create: `spec/raft/snapshot_spec.cr`
 
-The most foundational piece. After this task, an in-process call to `take_snapshot` (added in Task 3) writes both `snapshot.meta` and `snapshot.body` atomically; `Node.new` re-loads them on startup.
+The most foundational piece. After this task, an in-process call to `take_snapshot` (added in Task 3) writes a single `snapshot` file atomically; `Node.new` re-loads it on startup.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1053,6 +1053,6 @@ After all tasks land:
 4. **Edge cases knowingly deferred (PoC scope):**
    - Concurrent config change during snapshot — current code captures `@peers` at snapshot time; if a config change races with persistence, the snapshot may be slightly stale. Acceptable for PoC.
    - Snapshot streaming over an actual TCP transport — `Raft::TCPTransport` already handles arbitrary `Message` types; chunked snapshot bodies up to `Config.snapshot_chunk_size` (1 MB default) fit within `Message::MAX_ENTRIES_DATA_SIZE` (64 MB). No transport change needed.
-   - Snapshot chunk loss / re-send — leader retries on heartbeat tick; follower buffer at `snapshot.body.recv` is overwritten on offset==0 (handled by `mode = "wb"` when `last_log_index == 0`). Out-of-order chunks within a single attempt are not handled; the protocol assumes in-order delivery (TCPTransport guarantees this within one connection).
+   - Snapshot chunk loss / re-send — leader retries on heartbeat tick; follower buffer at `snapshot.tmp` is overwritten on offset==0 (handled by `mode = "wb"` when `last_log_index == 0`). Out-of-order chunks within a single attempt are not handled; the protocol assumes in-order delivery (TCPTransport guarantees this within one connection).
 
 5. **Edge cases knowingly deferred (to be revisited):** see the items in §4 above. The `examples/queue/` PoC keeps its current auto-ack `Consume` semantics — no AMQP-style deliver/ack redesign is in scope here or planned as a follow-up.

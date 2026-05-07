@@ -25,7 +25,6 @@ A fast, embeddable Raft consensus library for Crystal. The library implements th
 
 **What it does not (yet) do:**
 
-- **Snapshots / log compaction** — the log grows unbounded. See §6.5 for details.
 - **Linearizable reads** — no `ReadIndex` or leader lease. The application is responsible for reading state safely (e.g. by going through the leader, or accepting eventual consistency).
 - **Built-in clients** — there is no client-side library; the application defines its own RPC layer.
 
@@ -178,7 +177,7 @@ abstract def restore(io : IO)
 
 `apply` is invoked synchronously by the node every time the commit index advances past an entry. **There is no channel, no fiber, no allocation per entry** — it is a direct virtual dispatch. The cost of applying an entry is the cost of the user's `apply` method plus one virtual call.
 
-`snapshot` and `restore` are part of the interface but are **not currently invoked by the core**. See §6.5.
+`snapshot` and `restore` are invoked by the core as part of snapshot management (see §6.5).
 
 ### `Raft::Message`
 
@@ -198,7 +197,8 @@ A small struct of tunables read at construction time:
 | `election_timeout_max_ticks` | 20 | Election timeout upper bound (1000ms) |
 | `max_segment_size` | 64 MB | Log segment rollover threshold |
 | `max_append_entries_size` | 1 MB | Cap on `entries_data` per AppendEntries message |
-| `snapshot_chunk_size` | 1 MB | Reserved for future InstallSnapshot RPC |
+| `snapshot_chunk_size` | 1 MB | Chunk size for InstallSnapshot RPC payloads |
+| `snapshot_interval_entries` | 1000 | Trigger snapshot after this many committed entries |
 | `data_dir` | `"data"` | Where logs and metadata live |
 
 `Config` is not modified after a `Node` is constructed.
@@ -564,12 +564,12 @@ Honest accounting of what is and isn't implemented relative to the Raft paper an
 | Learners (non-voting members) | ✅ Implemented | Auto-promoted when caught up. |
 | Leadership transfer | ✅ Implemented | `transfer_leadership` + `TimeoutNow`. |
 | Joint consensus (multi-server changes) | ❌ Not implemented | Not needed if single-server changes are sufficient (which the paper argues they are). |
-| **Snapshots / log compaction** | ❌ **Not implemented** | `MessageType::InstallSnapshot` exists in the enum and `StateMachine#snapshot/restore` are abstract methods, but `Node` has no handler, no triggering, and no log-truncation path. The log grows unbounded. |
+| Snapshots / log compaction | ✅ Implemented | `Node` invokes `StateMachine#snapshot`/`restore`; snapshot persisted to a single `snapshot` file (`[index][term][peer_len][peers][sm_bytes]`) atomically; trigger every `Config.snapshot_interval_entries` committed entries; `InstallSnapshot` RPC chunked by `Config.snapshot_chunk_size`. Log truncates segments whose `last_index ≤ snapshot_index`. |
 | **Linearizable reads** (`ReadIndex`, leader lease) | ❌ **Not implemented** | The application is responsible for read consistency. |
 | Cluster bootstrap | ✅ Implemented | `Node#bootstrap` for the very first node; subsequent nodes join via `add_server`. |
 | Multi-raft on shared transport | ✅ Implemented (extension) | Messages multiplexed by `group_id`. |
 
-The two real gaps are **snapshots** and **linearizable reads**. Snapshots are the more serious of the two for production use: a long-running cluster will accumulate log indefinitely. The library is structured to support them — `StateMachine` already has the right interface, `Message` already has the enum values, `Config` already has `snapshot_chunk_size` — but the wiring is not there.
+The remaining real gap is **linearizable reads**. The library is structured to support `ReadIndex` / leader-lease style reads — the application can already check `node.role.leader?` and `node.commit_index` — but there is no convenience helper that performs the heartbeat-confirm-leader round before a read.
 
 ## 7. KV example walkthrough
 
@@ -596,7 +596,6 @@ The two real gaps are **snapshots** and **linearizable reads**. Snapshots are th
 What the KV example does **not** do:
 
 - Use `Raft::Server`. It manages per-group event loops directly to keep the `select`-based loop visible.
-- Snapshot. As noted in §6.5, snapshots aren't implemented in the core, and the example doesn't simulate them.
 - Linearizable reads. Reads go to the local node's `ValueStateMachine` directly (best-effort, eventually consistent).
 
 ## 8. Extending the library
@@ -634,7 +633,7 @@ The library does not constrain the encoding. Use whatever is fast and stable for
 
 ### Custom `StateMachine(T)`
 
-Subclass `Raft::StateMachine(T)` and implement `apply`, `snapshot`, and `restore`. Today only `apply` is invoked; `snapshot` and `restore` are required by the abstract interface but unused (see §6.5).
+Subclass `Raft::StateMachine(T)` and implement `apply`, `snapshot`, and `restore`. The core invokes all three: `apply` on every committed entry, and `snapshot`/`restore` during snapshot operations (see §6.5).
 
 `apply` is called on the Raft loop fiber. It must not block on I/O; if your state machine does I/O, buffer or defer it.
 
