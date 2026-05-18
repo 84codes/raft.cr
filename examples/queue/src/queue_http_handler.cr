@@ -26,6 +26,18 @@ class QueueHttpHandler
       handle_list_queues(context)
     when {"GET", "/raft/metrics"}
       handle_metrics_aggregated(context)
+    when {"POST", "/raft/admin/pause"}
+      apply_to_all_groups(context, "pause") { |n| {% if flag?(:raft_debug) %} n.pause {% end %} }
+    when {"POST", "/raft/admin/resume"}
+      apply_to_all_groups(context, "resume") { |n| {% if flag?(:raft_debug) %} n.resume {% end %} }
+    when {"POST", "/raft/admin/partition"}
+      apply_to_all_groups(context, "partition") { |n| {% if flag?(:raft_debug) %} n.partition {% end %} }
+    when {"POST", "/raft/admin/heal"}
+      apply_to_all_groups(context, "heal") { |n| {% if flag?(:raft_debug) %} n.heal {% end %} }
+    when {"POST", "/raft/admin/reset"}
+      apply_to_all_groups(context, "reset") { |n| {% if flag?(:raft_debug) %} n.reset {% end %} }
+    when {"POST", "/queue/rebalance"}, {"POST", "/kv/rebalance"}
+      handle_rebalance(context)
     else
       if path.starts_with?("/queues/")
         rest = path[8..]
@@ -186,6 +198,54 @@ class QueueHttpHandler
     context.response.status_code = 202
     context.response.content_type = "application/json"
     context.response.print({status: "delete_accepted", queue: name}.to_json)
+  end
+
+  # Round-robin distribute group leadership across cluster peer ids. Each peer
+  # node runs this independently; only groups currently led by THIS node can be
+  # transferred (Raft requires the leader to initiate). Mirrors the KV example.
+  private def handle_rebalance(context)
+    all_peer_ids = @meta_node.peers.map(&.id).sort
+    groups = @meta_sm.all_groups.to_a
+    transfers = [] of {String, UInt64, UInt64}
+
+    desired = {} of UInt64 => UInt64
+    groups.each_with_index do |(name, group_id), idx|
+      desired[group_id] = all_peer_ids[idx % all_peer_ids.size] unless all_peer_ids.empty?
+    end
+
+    groups.each do |name, group_id|
+      target_id = desired[group_id]?
+      next unless target_id
+      if (node = @nodes[group_id]?) && node.role.leader? && node.id != target_id
+        node.transfer_leadership(to: target_id)
+        transfers << {name, node.id, target_id}
+      end
+    end
+
+    context.response.content_type = "application/json"
+    context.response.print({
+      status:       "rebalance_initiated",
+      transfers:    transfers.size,
+      total_groups: groups.size,
+      details:      transfers.map { |k, f, t| {key: k, from: f, to: t} },
+    }.to_json)
+  end
+
+  # Apply a debug action to every Raft group hosted on this node (meta + all
+  # data groups). The library's /raft/admin/* endpoints only target the single
+  # @meta_node — calling them simulates "pause meta group", not "pause this
+  # whole physical node". This wrapper makes the chaos buttons (pause, partition,
+  # heal, reset) affect the entire node, which is what TUI demos assume.
+  private def apply_to_all_groups(context, action : String)
+    {% if flag?(:raft_debug) %}
+      @nodes.each_value { |node| yield node }
+      context.response.content_type = "application/json"
+      context.response.print({status: action, scope: "all_groups", count: @nodes.size}.to_json)
+    {% else %}
+      context.response.status_code = 503
+      context.response.content_type = "application/json"
+      context.response.print({error: "raft_debug build flag not set"}.to_json)
+    {% end %}
   end
 
   private def handle_metrics_aggregated(context)

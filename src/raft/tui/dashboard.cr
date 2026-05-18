@@ -121,17 +121,36 @@ module Raft
             line(io, "")
           end
 
-          line(io, "\e[1m\e[36m── Event Log ─────────────────────────────────────────\e[0m")
-          last_events = @events.last(6)
+          line(io, "\e[1m\e[36m── Event Log (last 10) ───────────────────────────────\e[0m")
+          last_events = @events.last(10)
           last_events.each do |event|
             line(io, "  #{event}")
           end
-          (6 - last_events.size).times { line(io, "") }
+          (10 - last_events.size).times { line(io, "") }
 
           line(io, "")
-          line(io, "\e[1m\e[36m── Controls ──────────────────────────────────────────\e[0m")
-          line(io, "  \e[1m[f]\e[0m Form cluster  \e[1m[B]\e[0m Bootstrap  \e[1m[j]\e[0m Join node  \e[1m[+]\e[0m Add server  \e[1m[-]\e[0m Remove server  \e[1m[b]\e[0m Rebalance")
-          line(io, "  \e[1m[p]\e[0m Pause  \e[1m[r]\e[0m Resume  \e[1m[x]\e[0m Partition  \e[1m[h]\e[0m Heal  \e[1m[k]\e[0m Kill leader  \e[1m[a]\e[0m Heal all  \e[1m[d]\e[0m Reset  \e[1m[q]\e[0m Quit")
+          line(io, "\e[1m\e[36m── Chaos / failure simulation ────────────────────────\e[0m")
+          line(io, "  \e[1m[k]\e[0m Kill leader        — pause every Raft group on the meta-leader node.")
+          line(io, "                          Watch web UI: each queue's \"Leader\" cell flips within ~1s.")
+          line(io, "                          Watch Grafana: orange \"Leader Changes\" annotation, brief commit-lag spike.")
+          line(io, "  \e[1m[p]\e[0m Pause node id      — same as [k] but for a specific node (prompts for id).")
+          line(io, "  \e[1m[r]\e[0m Resume node id     — undo a previous pause; node rejoins quorum.")
+          line(io, "  \e[1m[x]\e[0m Partition node id  — drop all Raft messages to/from a node, but keep it running.")
+          line(io, "                          Watch Grafana: \"Commit Lag per Node\" diverges; \"Log Truncations\"")
+          line(io, "                          may fire on heal if the partitioned node had uncommitted entries.")
+          line(io, "  \e[1m[h]\e[0m Heal node id       — reverse [x]; partitioned node catches up via AppendEntries")
+          line(io, "                          (or InstallSnapshot if the leader's log was truncated past it).")
+          line(io, "  \e[1m[a]\e[0m Heal all           — resume + heal every node. Cleanup after experiments.")
+          line(io, "  \e[1m[d]\e[0m Reset node id      — wipe a node's Raft state. Drastic; expect re-sync via snapshot.")
+          line(io, "")
+          line(io, "\e[1m\e[36m── Cluster lifecycle ─────────────────────────────────\e[0m")
+          line(io, "  \e[1m[f]\e[0m Form cluster       — bootstrap first reachable node + join all the others.")
+          line(io, "  \e[1m[B]\e[0m Bootstrap node id  — initialize a single node as the only voter.")
+          line(io, "  \e[1m[j]\e[0m Join node id       — add a reachable node as a voter via the current leader.")
+          line(io, "  \e[1m[+]\e[0m Add server         — register a new node id with the cluster.")
+          line(io, "  \e[1m[-]\e[0m Remove server      — remove a node from the cluster's membership.")
+          line(io, "  \e[1m[b]\e[0m Rebalance          — redistribute groups across nodes (KV-style only).")
+          line(io, "  \e[1m[q]\e[0m Quit")
         end
         STDOUT.write(buf.to_slice)
       end
@@ -191,7 +210,7 @@ module Raft
       private def kill_leader
         if leader = @nodes.find { |n| n.role == "leader" && n.reachable }
           post_admin(leader.address, "pause")
-          add_event("Paused leader (Node #{leader.id})")
+          add_event("Killed Node #{leader.id} — paused every Raft group on it (simulates crash)")
         else
           add_event("No reachable leader found")
         end
@@ -208,35 +227,35 @@ module Raft
       private def pause_node(id : Int32)
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "pause")
-          add_event("Paused Node #{id}")
+          add_event("Paused Node #{id} — all groups paused, simulating a crash")
         end
       end
 
       private def resume_node(id : Int32)
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "resume")
-          add_event("Resumed Node #{id}")
+          add_event("Resumed Node #{id} — all groups rejoin quorum")
         end
       end
 
       private def partition_node(id : Int32)
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "partition")
-          add_event("Partitioned Node #{id}")
+          add_event("Partitioned Node #{id} — node is running but isolated from Raft traffic")
         end
       end
 
       private def heal_node(id : Int32)
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "heal")
-          add_event("Healed Node #{id}")
+          add_event("Healed Node #{id} — reconnected; expect AppendEntries / InstallSnapshot catch-up")
         end
       end
 
       private def reset_node(id : Int32)
         if node = @nodes.find { |n| n.id == id.to_u64 }
           post_admin(node.address, "reset")
-          add_event("Reset Node #{id}")
+          add_event("Reset Node #{id} — wiped Raft state across all groups")
         end
       end
 
