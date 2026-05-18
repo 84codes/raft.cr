@@ -24,6 +24,8 @@ class QueueHttpHandler
       handle_web_ui(context)
     when {"GET", "/queues"}
       handle_list_queues(context)
+    when {"GET", "/raft/metrics"}
+      handle_metrics_aggregated(context)
     else
       if path.starts_with?("/queues/")
         rest = path[8..]
@@ -186,16 +188,61 @@ class QueueHttpHandler
     context.response.print({status: "delete_accepted", queue: name}.to_json)
   end
 
+  private def handle_metrics_aggregated(context)
+    context.response.content_type = "text/plain; version=0.0.4"
+    context.response.status_code = 200
+    node_id = @meta_node.id
+    @nodes.each_value do |node|
+      next unless metrics = node.metrics
+      metrics.set_gauge("raft_node_role", node.role.value.to_i64)
+      metrics.set_gauge("raft_node_term", node.current_term.to_i64)
+      metrics.set_gauge("raft_node_commit_index", node.commit_index.to_i64)
+      metrics.set_gauge("raft_node_last_log_index", node.log.last_index.to_i64)
+      metrics.set_gauge("raft_node_first_log_index", node.log.first_index.to_i64)
+      metrics.set_gauge("raft_node_segment_count", node.log.segment_count.to_i64)
+      metrics.set_gauge("raft_node_snapshot_index", node.snapshot_index.to_i64)
+      metrics.set_gauge("raft_node_snapshot_size_bytes", node.snapshot_size_bytes)
+      metrics.set_gauge("raft_node_peers", node.peers.size.to_i64)
+      metrics.set_gauge("raft_node_is_leader", node.role.leader? ? 1_i64 : 0_i64)
+      metrics.set_gauge("raft_node_leader_id", (node.leader_id || 0_u64).to_i64)
+      metrics.set_gauge("raft_node_paused", {% if flag?(:raft_debug) %} (node.paused ? 1_i64 : 0_i64) {% else %} 0_i64 {% end %})
+      metrics.set_gauge("raft_node_partitioned", {% if flag?(:raft_debug) %} (node.partitioned ? 1_i64 : 0_i64) {% else %} 0_i64 {% end %})
+      metrics.to_prometheus(context.response)
+    end
+
+    # Active-group markers and group-info — used by the cluster overview
+    # dashboard to filter out stale Prometheus series and render the table.
+    context.response << "raft_queue_group_active{node_id=\"" << node_id << "\",group_id=\"0\",key=\"meta\"} 1\n"
+    @meta_sm.all_groups.each do |name, group_id|
+      context.response << "raft_queue_group_active{node_id=\"" << node_id << "\",group_id=\"" << group_id << "\",key=\"" << name << "\"} 1\n"
+    end
+    @nodes.each do |gid, node|
+      # Skip nodes that don't know who the leader is — they would emit a bogus
+      # "followers" label that includes the leader (since reject(0) doesn't match
+      # any real peer), polluting the joined Groups Overview table.
+      next if (leader = node.leader_id).nil?
+      key = gid == 0_u64 ? "meta" : (@meta_sm.all_groups.find { |_, g| g == gid }.try(&.first) || "group-#{gid}")
+      all_ids = (node.peers.map(&.id) + [node.id]).uniq.sort
+      followers = all_ids.reject { |id| id == leader }.join(",")
+      context.response << "raft_queue_group_info{node_id=\"" << node_id << "\",group_id=\"" << gid << "\",key=\"" << key << "\",leader=\"" << leader << "\",followers=\"" << followers << "\"} 1\n"
+    end
+
+    @transport.to_prometheus(context.response)
+  end
+
   private def handle_list_queues(context)
-    queues = [] of NamedTuple(name: String, group_id: UInt64, depth: Int32, log_last_index: UInt64, is_leader: Bool, leader_id: Raft::NodeID?)
+    queues = [] of NamedTuple(name: String, group_id: UInt64, depth: Int32, log_last_index: UInt64, log_first_index: UInt64, segment_count: Int32, snapshot_index: UInt64, is_leader: Bool, leader_id: Raft::NodeID?)
     @meta_sm.all_groups.each do |name, group_id|
       sm = @state_machines[group_id]?
       node = @nodes[group_id]?
       depth = sm.try(&.depth) || 0
       log_last_index = node.try(&.log.last_index) || 0_u64
+      log_first_index = node.try(&.log.first_index) || 0_u64
+      segment_count = node.try(&.log.segment_count) || 0
+      snapshot_index = node.try(&.snapshot_index) || 0_u64
       is_leader = node.try(&.role) == Raft::Role::Leader
       leader_id = node.try(&.leader_id)
-      queues << {name: name, group_id: group_id, depth: depth, log_last_index: log_last_index, is_leader: is_leader, leader_id: leader_id}
+      queues << {name: name, group_id: group_id, depth: depth, log_last_index: log_last_index, log_first_index: log_first_index, segment_count: segment_count, snapshot_index: snapshot_index, is_leader: is_leader, leader_id: leader_id}
     end
     context.response.content_type = "application/json"
     context.response.print queues.to_json
@@ -264,7 +311,7 @@ class QueueHttpHandler
         <p class="info">Each queue is its own Raft group. Watch the gap grow between in-memory depth and on-disk log entries.</p>
         <table id="queues">
           <thead>
-            <tr><th>Queue</th><th>Group</th><th>Depth (memory)</th><th>Log entries (disk)</th><th>Leader</th><th>Role here</th></tr>
+            <tr><th>Queue</th><th>Group</th><th>Depth (memory)</th><th>Log entries (disk)</th><th>Segments</th><th>Snapshot @</th><th>Leader</th><th>Role here</th></tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -311,6 +358,8 @@ class QueueHttpHandler
                 '<td>' + q.group_id + '</td>' +
                 '<td>' + q.depth + '</td>' +
                 '<td>' + q.log_last_index + '</td>' +
+                '<td>' + q.segment_count + '</td>' +
+                '<td>' + q.snapshot_index + '</td>' +
                 '<td>' + (q.leader_id || 'unknown') + '</td>' +
                 '<td>' + (q.is_leader ? '<span class="leader">leader</span>' : 'follower') + '</td>' +
               '</tr>'

@@ -86,6 +86,10 @@ module Raft
           metrics.set_gauge("raft_node_term", @node.current_term.to_i64)
           metrics.set_gauge("raft_node_commit_index", @node.commit_index.to_i64)
           metrics.set_gauge("raft_node_last_log_index", @node.log.last_index.to_i64)
+          metrics.set_gauge("raft_node_first_log_index", @node.log.first_index.to_i64)
+          metrics.set_gauge("raft_node_segment_count", @node.log.segment_count.to_i64)
+          metrics.set_gauge("raft_node_snapshot_index", @node.snapshot_index.to_i64)
+          metrics.set_gauge("raft_node_snapshot_size_bytes", @node.snapshot_size_bytes)
           metrics.set_gauge("raft_node_peers", @node.peers.size.to_i64)
 
           context.response.content_type = "text/plain; version=0.0.4"

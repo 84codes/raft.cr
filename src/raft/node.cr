@@ -11,6 +11,11 @@ module Raft
     getter snapshot_term : UInt64 = 0_u64
     getter log : Log(T)
 
+    def snapshot_size_bytes : Int64
+      path = File.join(@config.data_dir, "snapshot")
+      File.exists?(path) ? File.size(path).to_i64 : 0_i64
+    end
+
     getter peers : Array(Peer)
     getter metrics : Metrics?
     {% if flag?(:raft_debug) %}

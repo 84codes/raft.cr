@@ -3,12 +3,18 @@
   "uid": "raft-overview",
   "timezone": "browser",
   "refresh": "5s",
-  "time": { "from": "now-15m", "to": "now" },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "annotations": {
     "list": [
       {
         "name": "Leader Changes",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
         "enable": true,
         "expr": "changes(max by (group_id) (raft_node_leader_id)[1m]) > 0",
         "tagKeys": "group_id",
@@ -23,7 +29,12 @@
       "id": 1,
       "title": "Meta Quorum Nodes",
       "type": "stat",
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "count(raft_node_role{group_id=\"0\"})",
@@ -36,12 +47,23 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 2 },
-              { "color": "green", "value": 3 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
             ]
           },
-          "color": { "mode": "thresholds" }
+          "color": {
+            "mode": "thresholds"
+          }
         }
       }
     },
@@ -49,22 +71,38 @@
       "id": 2,
       "title": "Active Groups",
       "type": "stat",
-      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "count(count by (group_id) (raft_kv_group_active))",
+          "expr": "count(count by (group_id) (raft_queue_group_active))",
           "legendFormat": "Groups"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
       }
     },
     {
       "id": 3,
       "title": "Max Commit Lag",
       "type": "stat",
-      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "max(raft_node_last_log_index - raft_node_commit_index)",
@@ -77,12 +115,23 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           },
-          "color": { "mode": "thresholds" }
+          "color": {
+            "mode": "thresholds"
+          }
         }
       }
     },
@@ -90,7 +139,12 @@
       "id": 4,
       "title": "Election Rate",
       "type": "stat",
-      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(rate(raft_elections_total[1m]))",
@@ -103,12 +157,23 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.1 },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           },
-          "color": { "mode": "thresholds" }
+          "color": {
+            "mode": "thresholds"
+          }
         }
       }
     },
@@ -116,7 +181,12 @@
       "id": 5,
       "title": "Leader Distribution per Node",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (node_id) (raft_node_is_leader)",
@@ -126,7 +196,12 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } }
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
         }
       }
     },
@@ -134,7 +209,12 @@
       "id": 6,
       "title": "Cluster Messages Rate",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (node_id) (rate(raft_messages_sent_total[1m]))",
@@ -146,47 +226,54 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "ops" }
+        "defaults": {
+          "unit": "ops"
+        }
       }
     },
     {
       "id": 7,
       "title": "Groups Overview (click group to drill down)",
       "type": "table",
-      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 10
+      },
       "targets": [
         {
-          "expr": "max by (group_id) (raft_node_leader_id) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "max by (group_id) (raft_node_leader_id) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "format": "table",
           "instant": true,
           "refId": "leader"
         },
         {
-          "expr": "max by (group_id) (raft_node_term) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "max by (group_id) (raft_node_term) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "format": "table",
           "instant": true,
           "refId": "term"
         },
         {
-          "expr": "min by (group_id) (raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "min by (group_id) (raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "format": "table",
           "instant": true,
           "refId": "commit"
         },
         {
-          "expr": "max by (group_id) (raft_node_last_log_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "max by (group_id) (raft_node_last_log_index) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "format": "table",
           "instant": true,
           "refId": "log_index"
         },
         {
-          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "format": "table",
           "instant": true,
           "refId": "lag"
         },
         {
-          "expr": "max by (group_id, followers) (raft_kv_group_info)",
+          "expr": "max by (group_id, followers) (raft_queue_group_info)",
           "format": "table",
           "instant": true,
           "refId": "followers"
@@ -195,7 +282,9 @@
       "transformations": [
         {
           "id": "seriesToColumns",
-          "options": { "byField": "group_id" }
+          "options": {
+            "byField": "group_id"
+          }
         },
         {
           "id": "organize",
@@ -235,7 +324,10 @@
       "fieldConfig": {
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Group" },
+            "matcher": {
+              "id": "byName",
+              "options": "Group"
+            },
             "properties": [
               {
                 "id": "links",
@@ -249,20 +341,35 @@
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Max Lag" },
+            "matcher": {
+              "id": "byName",
+              "options": "Max Lag"
+            },
             "properties": [
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "yellow", "value": 1 },
-                    { "color": "red", "value": 5 }
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
                   ]
                 }
               },
-              { "id": "custom.displayMode", "value": "color-background" }
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
             ]
           }
         ]
@@ -272,25 +379,37 @@
       "id": 8,
       "title": "Elections Rate per Group",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
-          "expr": "sum by (group_id) (rate(raft_elections_total[1m])) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "sum by (group_id) (rate(raft_elections_total[1m])) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "legendFormat": "Group {{group_id}}"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "ops" }
+        "defaults": {
+          "unit": "ops"
+        }
       }
     },
     {
       "id": 9,
       "title": "Commit Lag per Group",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
-          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_kv_group_active)",
+          "expr": "max by (group_id) (raft_node_last_log_index - raft_node_commit_index) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
           "legendFormat": "Group {{group_id}}"
         }
       ],
@@ -299,13 +418,251 @@
           "unit": "short",
           "thresholds": {
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         }
       }
+    },
+    {
+      "id": 10,
+      "title": "Leader Changes per Group (5m)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Sum of leadership changes per group over the last 5m. Steady 0 = stable; sustained spikes = unhealthy.",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (changes(raft_node_leader_id[5m])) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
+          "legendFormat": "Group {{group_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Log Truncations per Group (rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Followers dropping uncommitted entries on term mismatch. Healthy = 0; spikes correlate with leader changes.",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rate(raft_log_truncations_total[1m])) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
+          "legendFormat": "Group {{group_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Snapshots Taken (cluster total, rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 12,
+        "h": 8
+      },
+      "description": "rate(raft_snapshots_taken_total) summed across all nodes and groups \u2014 overall compaction activity.",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rate(raft_snapshots_taken_total[1m])) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
+          "legendFormat": "Group {{group_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Total Disk Footprint per Group (snapshot + log)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 38,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Approximation: sum of snapshot size and log entries currently on disk (last - first). The whole point of the snapshot/compaction work is to keep this bounded.",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (raft_node_snapshot_size_bytes) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
+          "legendFormat": "Group {{group_id}} snapshot bytes"
+        },
+        {
+          "expr": "sum by (group_id) (raft_node_last_log_index - raft_node_first_log_index) * on(group_id) group_left max by (group_id) (raft_queue_group_active)",
+          "legendFormat": "Group {{group_id}} log entries on disk"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Node Health (Prometheus scrape \u2014 real down detector)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 12,
+        "h": 6
+      },
+      "description": "up{job=\"raft\"}: 1 = Prometheus successfully scraped the node within the last interval; 0 = container down / port closed / network broken. Independent of what the node says about itself.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "up{job=\"raft\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Chaos State per Node",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 46,
+        "w": 12,
+        "h": 6
+      },
+      "description": "raft_node_paused / raft_node_partitioned per node \u2014 set by the TUI's [k]/[p]/[x]/[h] chaos buttons. 'Up but paused' is distinct from 'down'.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node_id) (raft_node_paused)",
+          "legendFormat": "Paused",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node_id) (raft_node_partitioned)",
+          "legendFormat": "Partitioned",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "node_id": "Node",
+              "Value #A": "Paused",
+              "Value #B": "Partitioned"
+            }
+          }
+        }
+      ]
     }
   ]
 }
