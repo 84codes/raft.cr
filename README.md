@@ -8,6 +8,7 @@ A fast, efficient Raft consensus library for Crystal. Generic data types, disk-f
 - **Generic type `T`** — bring your own data type with `to_io`/`from_io`
 - **Segmented disk log** — append-only segments with offset index
 - **Multi-raft ready** — multiple raft groups share one transport
+- **Snapshots & log compaction** — `StateMachine#snapshot`/`restore` invoked by core; chunked `InstallSnapshot` RPC for bringing lagging followers back online; log segments truncated past the snapshot index
 - **Abstract transport** — swap TCP for your own (e.g. embed in an AMQP broker)
 - **Execution context safe** — build with `-Dpreview_mt -Dexecution_context`
 
@@ -68,6 +69,11 @@ node.tick
 node.propose(MyCommand.new("set key=value"))
 messages = node.take_messages # send these to peers via your transport
 ```
+
+## Examples
+
+- [`examples/kv`](examples/kv) — single-key KV store, one Raft group per key. Demonstrates multi-raft and leader rebalancing.
+- [`examples/queue`](examples/queue) — multi-raft queue PoC with web UI, Prometheus + Grafana dashboards, and a chaos TUI (`bin/raft-tui`) for demonstrating snapshot/compaction, crash recovery, and `InstallSnapshot` live.
 
 ## Building
 
