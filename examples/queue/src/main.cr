@@ -52,6 +52,11 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(QueueCommand)) {
   cfg.election_timeout_min_ticks = 10_u32
   cfg.election_timeout_max_ticks = 20_u32
   cfg.heartbeat_ticks = 2_u32
+  # Demo-tuned: small segments + frequent snapshots make compaction visible
+  # at modest workloads (a few hundred messages produces multiple segments,
+  # multiple snapshots, and visible truncation in Grafana / the UI).
+  cfg.max_segment_size = 32_u32 * 1024_u32 # 32 KB
+  cfg.snapshot_interval_entries = 100_u64
   Dir.mkdir_p(cfg.data_dir)
   metrics = Raft::Metrics.new(node_id: node_id, group_id: group_id)
   node = Raft::Node(QueueCommand).new(
