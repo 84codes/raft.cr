@@ -225,46 +225,6 @@ module Raft
       )
     end
 
-    # Test helper — drives the apply-gate drain from outside without needing
-    # a full apply_entries cycle. Removed when Task 5 lands.
-    def drain_pending_apply_for_test
-      drain_pending_apply
-    end
-
-    # Test helper — enqueue a pending-apply entry directly. Removed when Task 5 lands.
-    def enqueue_pending_apply_for_test(target_commit : UInt64, &block : UInt64? ->)
-      @pending_apply << PendingRead.new(target_commit, Set(NodeID).new, @current_term, block)
-    end
-
-    # Test helper — Removed when Task 5 lands.
-    def pending_reads_size_for_test : Int32
-      @pending_reads.size
-    end
-
-    # Test helper — Removed when Task 5 lands.
-    def pending_apply_size_for_test : Int32
-      @pending_apply.size
-    end
-
-    # Test helper — force this node into leader state for a multi-voter cluster.
-    # Sets up a noop as committed so last_applied >= commit_index. Removed when Task 5 lands.
-    def force_leader_for_test(peer_ids : Array(NodeID))
-      @peers = peer_ids.map { |pid| Peer.new(pid) } + [Peer.new(@id)]
-      @current_term = 1_u64
-      @role = Role::Leader
-      @leader_id = @id
-      @heartbeat_tick = 0_u32
-      other_peers.each do |peer|
-        @next_index[peer.id] = @log.last_index + 1
-        @match_index[peer.id] = 0_u64
-      end
-      # Append noop and commit it (we are the sole authority for the test).
-      @log.append(term: @current_term, entry_type: EntryType::Noop)
-      @commit_index = @log.last_index
-      apply_entries(@last_applied + 1, @commit_index)
-      persist_state
-    end
-
     def transfer_leadership(to target : NodeID) : Bool
       return false unless @role == Role::Leader
       return false unless @peers.any? { |p| p.id == target && p.voter? }
