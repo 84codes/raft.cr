@@ -42,6 +42,17 @@ module Raft
       get(index).term
     end
 
+    # Resolve `index` to {segment_fd, byte_offset, byte_length} for zero-copy
+    # senders (e.g., sendfile/splice/io_uring). Returns nil if the index has
+    # been compacted away or is past EOF.
+    def byte_range_for(index : UInt64) : {Int32, UInt64, UInt32}?
+      return nil if index < first_index
+      return nil if index > @last_index
+      seg = segment_for(index)
+      offset, length = seg.byte_range_for(index)
+      {seg.fd, offset, length}
+    end
+
     def truncate_after(index : UInt64)
       # Remove segments entirely past the target index
       while @segments.size > 1 && @segments.last.first_index > index
