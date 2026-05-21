@@ -41,6 +41,19 @@ module Raft
     @on_configuration_change : Proc(Array(Peer), Nil)?
     @on_configuration_applied : Proc(Array(Peer), Nil)?
     @pending_config_index : UInt64 = 0_u64
+    @pending_reads : Array(PendingRead) = [] of PendingRead
+    @pending_apply : Array(PendingRead) = [] of PendingRead
+
+    private class PendingRead
+      property commit_index : UInt64
+      property acks : Set(NodeID)
+      property confirmation_term : UInt64
+      property callback : Proc(UInt64?, Nil)
+      property ticks_waited : UInt32 = 0_u32
+
+      def initialize(@commit_index, @acks, @confirmation_term, @callback)
+      end
+    end
 
     def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64, @address : String = "")
       if peers.empty?
@@ -110,6 +123,20 @@ module Raft
           advance_commit_index
           send_append_entries
         end
+        sweep_pending_read_timeouts
+      end
+    end
+
+    private def sweep_pending_read_timeouts
+      return if @pending_reads.empty?
+      @pending_reads.reject! do |pr|
+        pr.ticks_waited += 1_u32
+        if pr.ticks_waited >= @config.read_index_timeout_ticks
+          pr.callback.call(nil)
+          true
+        else
+          false
+        end
       end
     end
 
@@ -163,6 +190,46 @@ module Raft
       advance_commit_index
       send_append_entries
       true
+    end
+
+    # Linearizable read primitive. Block fires with the commit_index that is
+    # safe to read at, or nil if leadership could not be confirmed.
+    #
+    # Behaviour:
+    #   - On a non-leader: callback fires synchronously with nil.
+    #   - On a standalone leader (no other voters): registered for the apply
+    #     gate only; fires once @last_applied >= the captured commit_index.
+    #   - On a multi-voter leader: waits for a heartbeat-ack quorum to confirm
+    #     leadership at or after registration time, then waits for the apply
+    #     gate.
+    #
+    # The callback fires with nil in three cases: the node is not the leader
+    # at call time; the leader steps down before quorum confirmation; or
+    # Config.read_index_timeout_ticks ticks elapse without quorum confirmation.
+    # Note: once a read is quorum-confirmed and parked at the apply gate, it
+    # has no upper time bound — a wedged state machine will hold reads open
+    # indefinitely until the node steps down.
+    def read_index(&block : UInt64? ->)
+      unless @role == Role::Leader
+        block.call(nil)
+        return
+      end
+      if other_voters.empty?
+        # Standalone — no quorum needed; queue at the apply gate.
+        if @last_applied >= @commit_index
+          block.call(@commit_index)
+        else
+          @pending_apply << PendingRead.new(@commit_index, Set(NodeID).new, @current_term, block)
+        end
+        return
+      end
+      # Multi-voter path.
+      @pending_reads << PendingRead.new(
+        commit_index: @commit_index,
+        acks: Set(NodeID).new.tap(&.add(@id)),
+        confirmation_term: @current_term,
+        callback: block,
+      )
     end
 
     def transfer_leadership(to target : NodeID) : Bool
@@ -328,6 +395,7 @@ module Raft
           last_log_term: @log.last_term,
         )}
       end
+      cancel_pending_reads
     end
 
     private def become_follower(leader : NodeID? = nil)
@@ -339,6 +407,14 @@ module Raft
       @transfer_target = nil
       persist_state
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "follower"}))
+      cancel_pending_reads
+    end
+
+    private def cancel_pending_reads
+      return if @pending_reads.empty? && @pending_apply.empty?
+      (@pending_reads + @pending_apply).each { |pr| pr.callback.call(nil) }
+      @pending_reads.clear
+      @pending_apply.clear
     end
 
     private def become_leader
@@ -490,6 +566,34 @@ module Raft
         hint = msg.reject_hint
         @next_index[msg.from] = Math.max(hint + 1, 1_u64)
       end
+      record_read_index_ack(msg) if msg.success
+    end
+
+    private def record_read_index_ack(msg : Message)
+      return if @pending_reads.empty?
+      return if msg.term < @current_term       # stale ack — protocol invariant
+      voter_ids = voters.map(&.id).to_set
+      return unless voter_ids.includes?(msg.from)
+
+      promoted = [] of PendingRead
+      @pending_reads.reject! do |pr|
+        # Only count acks at-or-after the pending read's confirmation_term.
+        next false if msg.term < pr.confirmation_term
+        pr.acks.add(msg.from)
+        if pr.acks.size >= quorum_size
+          promoted << pr
+          true
+        else
+          false
+        end
+      end
+      promoted.each do |pr|
+        if @last_applied >= pr.commit_index
+          pr.callback.call(pr.commit_index)
+        else
+          @pending_apply << pr
+        end
+      end
     end
 
     private def advance_commit_index
@@ -532,6 +636,19 @@ module Raft
       if @snapshot_index < @last_applied &&
          @last_applied - @snapshot_index >= @config.snapshot_interval_entries
         take_snapshot
+      end
+      drain_pending_apply
+    end
+
+    private def drain_pending_apply
+      return if @pending_apply.empty?
+      @pending_apply.reject! do |pr|
+        if @last_applied >= pr.commit_index
+          pr.callback.call(pr.commit_index)
+          true
+        else
+          false
+        end
       end
     end
 
