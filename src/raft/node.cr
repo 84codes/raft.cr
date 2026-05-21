@@ -429,6 +429,7 @@ module Raft
       end
       # Append no-op to force log convergence — truncates stale entries on followers
       @log.append(term: @current_term, entry_type: EntryType::Noop)
+      @log.sync
       advance_commit_index
       send_append_entries
     end
@@ -933,6 +934,7 @@ module Raft
     private def append_configuration(new_peers : Array(Peer))
       config_bytes = serialize_peers(new_peers)
       entry = @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
+      @log.sync
       @pending_config_index = entry.index
 
       # Initialize replication state for any new peers

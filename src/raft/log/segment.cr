@@ -78,6 +78,16 @@ module Raft
         # references valid ranges.
       end
 
+      # Re-extends a recovered segment's file to a new (larger) capacity so it
+      # can continue accepting appends. No-op if new_capacity <= @capacity. Used
+      # by Log#recover_segments on the active segment to restore appendability
+      # after a close+reopen cycle.
+      def expand_to(new_capacity : Int64)
+        return if new_capacity <= @capacity
+        @file.truncate(new_capacity)
+        @capacity = new_capacity
+      end
+
       # Flush dirty page-cache pages for this segment to the device. Called
       # from the Raft commit path at durability boundaries.
       def sync

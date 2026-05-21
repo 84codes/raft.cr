@@ -235,6 +235,25 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
+  it "expand_to re-extends capacity for continued appends" do
+    dir = File.tempname("seg_expand")
+    Dir.mkdir_p(dir)
+    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("a")))
+    seg.close
+    # File on disk is now shrunk to the size of one entry.
+
+    seg2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
+    seg2.has_capacity_for?(100).should be_false  # capacity = logical_size after close
+    seg2.expand_to(2048_i64)
+    seg2.has_capacity_for?(100).should be_true   # now we can append again
+    seg2.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("b")))
+    seg2.count.should eq 2_u32
+
+    seg2.close
+    FileUtils.rm_rf(dir)
+  end
+
   it "byte_range_for returns disjoint ranges covering each entry" do
     dir = File.tempname("seg_byte_range")
     Dir.mkdir_p(dir)

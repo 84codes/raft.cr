@@ -151,6 +151,10 @@ module Raft
           last_seg = @segments.last
           @last_index = last_seg.last_index
           @last_term = last_seg.count > 0 ? get(@last_index).term : 0_u64
+          # Restore appendability on the active (last) segment: close-truncate
+          # shrunk it to @logical_size; re-extend back to max_segment_size so
+          # the next append doesn't immediately rotate to a new segment.
+          last_seg.expand_to(@config.max_segment_size.to_i64)
         end
       end
     end
