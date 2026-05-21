@@ -159,3 +159,68 @@ describe "Raft::Node#read_index multi-voter quorum confirmation" do
     FileUtils.rm_rf(dir)
   end
 end
+
+describe "Raft::Node#read_index cleanup paths" do
+  it "fires nil and clears pending reads when leader steps down" do
+    dir = File.tempname("raft_read_index_stepdown")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.heartbeat_ticks = 1_u32
+    cfg.election_timeout_min_ticks = 3_u32
+    cfg.election_timeout_max_ticks = 5_u32
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.force_leader_for_test([2_u64, 3_u64])
+
+    received = [] of UInt64?
+    node.read_index { |idx| received << idx }
+    received.should be_empty
+    node.pending_reads_size_for_test.should eq 1
+
+    # Force a step-down: receive AppendEntries from a higher-term peer.
+    node.step(Raft::Message.new(
+      type: Raft::MessageType::AppendEntries,
+      from: 2_u64,
+      term: node.current_term + 5_u64,
+      prev_log_index: 0_u64,
+      prev_log_term: 0_u64,
+      commit_index: 0_u64,
+    ))
+    node.role.leader?.should be_false
+    received.should eq [nil]
+    node.pending_reads_size_for_test.should eq 0
+    node.pending_apply_size_for_test.should eq 0
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "fires nil after read_index_timeout_ticks elapse without quorum" do
+    dir = File.tempname("raft_read_index_timeout")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.heartbeat_ticks = 1_u32
+    cfg.election_timeout_min_ticks = 10_u32   # Don't trigger spurious elections
+    cfg.election_timeout_max_ticks = 10_u32
+    cfg.read_index_timeout_ticks = 3_u32
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.force_leader_for_test([2_u64, 3_u64])
+
+    received = [] of UInt64?
+    node.read_index { |idx| received << idx }
+    received.should be_empty
+
+    # No ack ever arrives. Tick past timeout.
+    4.times { node.tick }
+    received.should eq [nil]
+    node.pending_reads_size_for_test.should eq 0
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end

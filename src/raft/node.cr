@@ -44,11 +44,16 @@ module Raft
     @pending_reads : Array(PendingRead) = [] of PendingRead
     @pending_apply : Array(PendingRead) = [] of PendingRead
 
-    private record PendingRead,
-      commit_index : UInt64,
-      acks : Set(NodeID),
-      confirmation_term : UInt64,
-      callback : Proc(UInt64?, Nil)
+    private class PendingRead
+      property commit_index : UInt64
+      property acks : Set(NodeID)
+      property confirmation_term : UInt64
+      property callback : Proc(UInt64?, Nil)
+      property ticks_waited : UInt32 = 0_u32
+
+      def initialize(@commit_index, @acks, @confirmation_term, @callback)
+      end
+    end
 
     def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64, @address : String = "")
       if peers.empty?
@@ -117,6 +122,20 @@ module Raft
           @heartbeat_tick = 0_u32
           advance_commit_index
           send_append_entries
+        end
+        sweep_pending_read_timeouts
+      end
+    end
+
+    private def sweep_pending_read_timeouts
+      return if @pending_reads.empty?
+      @pending_reads.reject! do |pr|
+        pr.ticks_waited += 1_u32
+        if pr.ticks_waited >= @config.read_index_timeout_ticks
+          pr.callback.call(nil)
+          true
+        else
+          false
         end
       end
     end
@@ -409,6 +428,7 @@ module Raft
           last_log_term: @log.last_term,
         )}
       end
+      cancel_pending_reads
     end
 
     private def become_follower(leader : NodeID? = nil)
@@ -420,6 +440,14 @@ module Raft
       @transfer_target = nil
       persist_state
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "follower"}))
+      cancel_pending_reads
+    end
+
+    private def cancel_pending_reads
+      return if @pending_reads.empty? && @pending_apply.empty?
+      (@pending_reads + @pending_apply).each { |pr| pr.callback.call(nil) }
+      @pending_reads.clear
+      @pending_apply.clear
     end
 
     private def become_leader
