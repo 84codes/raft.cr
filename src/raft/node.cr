@@ -41,6 +41,14 @@ module Raft
     @on_configuration_change : Proc(Array(Peer), Nil)?
     @on_configuration_applied : Proc(Array(Peer), Nil)?
     @pending_config_index : UInt64 = 0_u64
+    @pending_reads : Array(PendingRead) = [] of PendingRead
+    @pending_apply : Array(PendingRead) = [] of PendingRead
+
+    private record PendingRead,
+      commit_index : UInt64,
+      acks : Set(NodeID),
+      confirmation_term : UInt64,
+      callback : Proc(UInt64?, Nil)
 
     def initialize(@id : NodeID, peers : Array(NodeID), @config : Config, @state_machine : StateMachine(T), @metrics : Metrics? = nil, @group_id : UInt64 = 0_u64, @address : String = "")
       if peers.empty?
@@ -163,6 +171,33 @@ module Raft
       advance_commit_index
       send_append_entries
       true
+    end
+
+    # Linearizable read primitive. Block fires with the commit_index that is
+    # safe to read at, or nil if leadership could not be confirmed.
+    #
+    # Behaviour:
+    #   - On a non-leader: callback fires synchronously with nil.
+    #   - On a standalone leader (no other voters): registered for the apply
+    #     gate only; fires once @last_applied >= the captured commit_index.
+    #   - On a multi-voter leader: waits for a heartbeat quorum to confirm
+    #     leadership at or after registration time, then waits for the apply
+    #     gate. (Tasks 3 + 4 implement this branch.)
+    def read_index(&block : UInt64? ->)
+      unless @role == Role::Leader
+        block.call(nil)
+        return
+      end
+      if other_voters.empty?
+        # Standalone — no quorum needed; queue at the apply gate.
+        if @last_applied >= @commit_index
+          block.call(@commit_index)
+        else
+          @pending_apply << PendingRead.new(@commit_index, Set(NodeID).new, @current_term, block)
+        end
+        return
+      end
+      # Multi-voter path lands in Task 3.
     end
 
     def transfer_leadership(to target : NodeID) : Bool
