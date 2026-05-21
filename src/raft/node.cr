@@ -199,9 +199,16 @@ module Raft
     #   - On a non-leader: callback fires synchronously with nil.
     #   - On a standalone leader (no other voters): registered for the apply
     #     gate only; fires once @last_applied >= the captured commit_index.
-    #   - On a multi-voter leader: waits for a heartbeat quorum to confirm
+    #   - On a multi-voter leader: waits for a heartbeat-ack quorum to confirm
     #     leadership at or after registration time, then waits for the apply
-    #     gate. (Tasks 3 + 4 implement this branch.)
+    #     gate.
+    #
+    # The callback fires with nil in three cases: the node is not the leader
+    # at call time; the leader steps down before quorum confirmation; or
+    # Config.read_index_timeout_ticks ticks elapse without quorum confirmation.
+    # Note: once a read is quorum-confirmed and parked at the apply gate, it
+    # has no upper time bound — a wedged state machine will hold reads open
+    # indefinitely until the node steps down.
     def read_index(&block : UInt64? ->)
       unless @role == Role::Leader
         block.call(nil)
