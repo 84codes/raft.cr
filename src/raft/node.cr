@@ -197,7 +197,13 @@ module Raft
         end
         return
       end
-      # Multi-voter path lands in Task 3.
+      # Multi-voter path.
+      @pending_reads << PendingRead.new(
+        commit_index: @commit_index,
+        acks: Set(NodeID).new.tap(&.add(@id)),
+        confirmation_term: @current_term,
+        callback: block,
+      )
     end
 
     # Test helper — drives the apply-gate drain from outside without needing
@@ -209,6 +215,35 @@ module Raft
     # Test helper — enqueue a pending-apply entry directly. Removed when Task 5 lands.
     def enqueue_pending_apply_for_test(target_commit : UInt64, &block : UInt64? ->)
       @pending_apply << PendingRead.new(target_commit, Set(NodeID).new, @current_term, block)
+    end
+
+    # Test helper — Removed when Task 5 lands.
+    def pending_reads_size_for_test : Int32
+      @pending_reads.size
+    end
+
+    # Test helper — Removed when Task 5 lands.
+    def pending_apply_size_for_test : Int32
+      @pending_apply.size
+    end
+
+    # Test helper — force this node into leader state for a multi-voter cluster.
+    # Sets up a noop as committed so last_applied >= commit_index. Removed when Task 5 lands.
+    def force_leader_for_test(peer_ids : Array(NodeID))
+      @peers = peer_ids.map { |pid| Peer.new(pid) } + [Peer.new(@id)]
+      @current_term = 1_u64
+      @role = Role::Leader
+      @leader_id = @id
+      @heartbeat_tick = 0_u32
+      other_peers.each do |peer|
+        @next_index[peer.id] = @log.last_index + 1
+        @match_index[peer.id] = 0_u64
+      end
+      # Append noop and commit it (we are the sole authority for the test).
+      @log.append(term: @current_term, entry_type: EntryType::Noop)
+      @commit_index = @log.last_index
+      apply_entries(@last_applied + 1, @commit_index)
+      persist_state
     end
 
     def transfer_leadership(to target : NodeID) : Bool
@@ -535,6 +570,34 @@ module Raft
         @metrics.try(&.increment("raft_replication_rejections_total"))
         hint = msg.reject_hint
         @next_index[msg.from] = Math.max(hint + 1, 1_u64)
+      end
+      record_read_index_ack(msg) if msg.success
+    end
+
+    private def record_read_index_ack(msg : Message)
+      return if @pending_reads.empty?
+      return if msg.term < @current_term       # stale ack — protocol invariant
+      voter_ids = voters.map(&.id).to_set
+      return unless voter_ids.includes?(msg.from)
+
+      promoted = [] of PendingRead
+      @pending_reads.reject! do |pr|
+        # Only count acks at-or-after the pending read's confirmation_term.
+        next false if msg.term < pr.confirmation_term
+        pr.acks.add(msg.from)
+        if pr.acks.size >= quorum_size
+          promoted << pr
+          true
+        else
+          false
+        end
+      end
+      promoted.each do |pr|
+        if @last_applied >= pr.commit_index
+          pr.callback.call(pr.commit_index)
+        else
+          @pending_apply << pr
+        end
       end
     end
 

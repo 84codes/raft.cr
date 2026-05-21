@@ -84,3 +84,78 @@ describe "Raft::Node#read_index apply gate" do
     FileUtils.rm_rf(dir)
   end
 end
+
+describe "Raft::Node#read_index multi-voter quorum confirmation" do
+  it "moves pending read to apply gate once a heartbeat quorum acks" do
+    dir = File.tempname("raft_read_index_quorum")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.heartbeat_ticks = 1_u32
+    cfg.election_timeout_min_ticks = 3_u32
+    cfg.election_timeout_max_ticks = 5_u32
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    # Force the node into leader state of a 3-voter cluster with a committed noop.
+    node.force_leader_for_test([2_u64, 3_u64])
+    # Node is now leader of a 3-voter cluster, term=1, commit_index>=1, last_applied>=1.
+
+    received = [] of UInt64?
+    node.read_index { |idx| received << idx }
+
+    # No acks yet — callback hasn't fired.
+    received.should be_empty
+    node.pending_reads_size_for_test.should eq 1
+    node.pending_apply_size_for_test.should eq 0
+
+    # Simulate ONE follower acking — quorum of 3 needs 2 acks; leader self-acks already.
+    node.step(Raft::Message.new(
+      type: Raft::MessageType::AppendEntriesResponse,
+      from: 2_u64,
+      term: node.current_term,
+      success: true,
+      last_log_index: node.log.last_index,
+    ))
+    node.pending_reads_size_for_test.should eq 0  # confirmed (leader + node 2 = quorum), promoted
+    node.pending_apply_size_for_test.should eq 0  # apply gate already satisfied: fired immediately
+    received.size.should eq 1
+    received.first.not_nil!.should be >= 1_u64
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "ignores stale-term acks" do
+    dir = File.tempname("raft_read_index_stale_term")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    cfg.heartbeat_ticks = 1_u32
+    cfg.election_timeout_min_ticks = 3_u32
+    cfg.election_timeout_max_ticks = 5_u32
+
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.force_leader_for_test([2_u64, 3_u64])
+    leader_term = node.current_term
+
+    received = [] of UInt64?
+    node.read_index { |idx| received << idx }
+    node.pending_reads_size_for_test.should eq 1
+
+    # Stale ack: from a prior term (lower than confirmation_term).
+    node.step(Raft::Message.new(
+      type: Raft::MessageType::AppendEntriesResponse,
+      from: 2_u64,
+      term: leader_term - 1,    # stale
+      success: true,
+      last_log_index: node.log.last_index,
+    ))
+    received.should be_empty
+    node.pending_reads_size_for_test.should eq 1
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end
