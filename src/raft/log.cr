@@ -11,6 +11,10 @@ module Raft
       recover_segments
     end
 
+    def sync
+      @segments.last.sync unless @segments.empty?
+    end
+
     def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal, config_data : Bytes = Bytes.new(0)) : LogEntry(T)
       @last_index += 1
       @last_term = term

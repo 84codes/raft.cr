@@ -186,6 +186,7 @@ module Raft
     def propose(data : T) : Bool
       return false unless @role == Role::Leader
       @log.append(term: @current_term, data: data, entry_type: EntryType::Normal)
+      @log.sync
       @metrics.try(&.increment("raft_proposals_total"))
       advance_commit_index
       send_append_entries
@@ -523,6 +524,8 @@ module Raft
         end
         @metrics.try(&.increment("raft_log_entries_received_total", by: msg.entries_count.to_i64))
       end
+
+      @log.sync if msg.entries_count > 0
 
       # Update commit index and apply
       if msg.commit_index > @commit_index
