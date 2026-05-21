@@ -23,9 +23,8 @@ A fast, embeddable Raft consensus library for Crystal. The library implements th
 - Segmented, mmap-backed log on disk
 - Prometheus metrics
 
-**What it does not (yet) do:**
+**What it does not do:**
 
-- **Linearizable reads** — no `ReadIndex` or leader lease. The application is responsible for reading state safely (e.g. by going through the leader, or accepting eventual consistency).
 - **Built-in clients** — there is no client-side library; the application defines its own RPC layer.
 
 **Target use cases:** key-value stores, AMQP broker quorum queues (multi-raft), and similar consensus-backed services where the host application owns the I/O loop.
@@ -565,11 +564,11 @@ Honest accounting of what is and isn't implemented relative to the Raft paper an
 | Leadership transfer | ✅ Implemented | `transfer_leadership` + `TimeoutNow`. |
 | Joint consensus (multi-server changes) | ❌ Not implemented | Not needed if single-server changes are sufficient (which the paper argues they are). |
 | Snapshots / log compaction | ✅ Implemented | `Node` invokes `StateMachine#snapshot`/`restore`; snapshot persisted to a single `snapshot` file (`[index][term][peer_len][peers][sm_bytes]`) atomically; trigger every `Config.snapshot_interval_entries` committed entries; `InstallSnapshot` RPC chunked by `Config.snapshot_chunk_size`. Log truncates segments whose `last_index ≤ snapshot_index`. |
-| **Linearizable reads** (`ReadIndex`, leader lease) | ❌ **Not implemented** | The application is responsible for read consistency. |
+| Linearizable reads (`ReadIndex`) | ✅ Implemented | `Raft::Node#read_index(&block)` registers a pending read; leadership confirmation rides on the next heartbeat-ack quorum, then the callback fires once `last_applied >= commit_index`. Step-down or `read_index_timeout_ticks` ticks without confirmation fires the callback with `nil`. Leader-lease optimisation is not implemented. |
 | Cluster bootstrap | ✅ Implemented | `Node#bootstrap` for the very first node; subsequent nodes join via `add_server`. |
 | Multi-raft on shared transport | ✅ Implemented (extension) | Messages multiplexed by `group_id`. |
 
-The remaining real gap is **linearizable reads**. The library is structured to support `ReadIndex` / leader-lease style reads — the application can already check `node.role.leader?` and `node.commit_index` — but there is no convenience helper that performs the heartbeat-confirm-leader round before a read.
+With `ReadIndex` in place, the remaining items in this table are deliberate non-goals for the PoC: joint consensus is not needed when single-server membership changes are sufficient, and leader leases are a latency optimisation on top of `ReadIndex` rather than a correctness fix. Both can be added incrementally without breaking existing applications.
 
 ## 7. KV example walkthrough
 
