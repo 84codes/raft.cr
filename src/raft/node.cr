@@ -200,6 +200,17 @@ module Raft
       # Multi-voter path lands in Task 3.
     end
 
+    # Test helper — drives the apply-gate drain from outside without needing
+    # a full apply_entries cycle. Removed when Task 5 lands.
+    def drain_pending_apply_for_test
+      drain_pending_apply
+    end
+
+    # Test helper — enqueue a pending-apply entry directly. Removed when Task 5 lands.
+    def enqueue_pending_apply_for_test(target_commit : UInt64, &block : UInt64? ->)
+      @pending_apply << PendingRead.new(target_commit, Set(NodeID).new, @current_term, block)
+    end
+
     def transfer_leadership(to target : NodeID) : Bool
       return false unless @role == Role::Leader
       return false unless @peers.any? { |p| p.id == target && p.voter? }
@@ -567,6 +578,19 @@ module Raft
       if @snapshot_index < @last_applied &&
          @last_applied - @snapshot_index >= @config.snapshot_interval_entries
         take_snapshot
+      end
+      drain_pending_apply
+    end
+
+    private def drain_pending_apply
+      return if @pending_apply.empty?
+      @pending_apply.reject! do |pr|
+        if @last_applied >= pr.commit_index
+          pr.callback.call(pr.commit_index)
+          true
+        else
+          false
+        end
       end
     end
 

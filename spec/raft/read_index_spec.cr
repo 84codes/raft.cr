@@ -43,3 +43,44 @@ describe "Raft::Node#read_index synchronous paths" do
     FileUtils.rm_rf(dir)
   end
 end
+
+describe "Raft::Node#read_index apply gate" do
+  it "drain_pending_apply fires no callbacks when last_applied < target" do
+    dir = File.tempname("raft_read_index_drain_no_op")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.bootstrap
+    node.propose(TestData.new("a")) # commit_index=2, last_applied=2
+
+    received = [] of UInt64?
+    node.enqueue_pending_apply_for_test(target_commit: 5_u64) { |idx| received << idx }
+    # last_applied = 2 < 5: drain does nothing.
+    node.drain_pending_apply_for_test
+    received.should be_empty
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+
+  it "drain_pending_apply fires callback when last_applied >= target" do
+    dir = File.tempname("raft_read_index_drain_fires")
+    Dir.mkdir_p(dir)
+    cfg = Raft::Config.new
+    cfg.data_dir = dir
+    sm = TestStateMachine.new
+    node = Raft::Node(TestData).new(id: 1_u64, peers: [] of UInt64, config: cfg, state_machine: sm)
+    node.bootstrap
+    node.propose(TestData.new("a")) # commit_index=2, last_applied=2
+
+    received = [] of UInt64?
+    node.enqueue_pending_apply_for_test(target_commit: 2_u64) { |idx| received << idx }
+    node.drain_pending_apply_for_test
+    received.should eq [2_u64]
+
+    node.close
+    FileUtils.rm_rf(dir)
+  end
+end
