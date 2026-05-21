@@ -127,13 +127,17 @@ module Raft
             # recovery is fine; we're not concurrent here).
             @file.seek(cursor)
             entry = LogEntry(T).from_io(@file)
+            # Heuristic stop: real entries always have term >= 1 AND index >= 1
+            # (bootstrap noop is the first real entry at term=1 index=1). An all-zero
+            # parse means we hit the pre-allocated zero tail of a crashed segment.
+            break if entry.term == 0_u64 && entry.index == 0_u64
             @offsets << offset
             @last_index = entry.index
             @count += 1
             cursor = @file.tell.to_i64
             @logical_size = cursor
           rescue ex
-            # Partial trailing entry, or pre-allocated garbage tail. Stop —
+            # Partial trailing entry, or non-zero garbage tail. Stop —
             # future appends overwrite from @logical_size onward.
             ::Log.warn { "Truncating partial entry at offset #{offset} in segment starting at index #{@first_index}: #{ex.message}" }
             break
