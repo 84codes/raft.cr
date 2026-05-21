@@ -108,7 +108,7 @@ module Raft
       def close
         # Truncate the file to the valid-data size so that on the next open
         # File#size returns exactly @logical_size, giving recovery a clean
-        # sentinel. This mirrors MFile's close(truncate_to_size: true) behaviour.
+        # sentinel for recovery.
         @file.truncate(@logical_size)
         @file.close
       end
