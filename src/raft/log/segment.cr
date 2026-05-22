@@ -1,5 +1,4 @@
 require "file_utils"
-require "../mfile"
 
 module Raft
   class Log(T)
@@ -7,36 +6,30 @@ module Raft
       getter first_index : UInt64
       getter last_index : UInt64
       getter count : UInt32 = 0_u32
+      getter size : Int64 = 0_i64
 
       @offsets : Array(UInt64) = [] of UInt64
-      @file : MFile
+      @file : ::File
       @dir : String
 
-      def initialize(@dir : String, @first_index : UInt64, capacity : Int64)
+      def initialize(@dir : String, @first_index : UInt64)
         @last_index = @first_index - 1
-        path = File.join(@dir, segment_filename)
-        @file = MFile.new(path, capacity: capacity)
-      end
-
-      def self.open(dir : String, first_index : UInt64) : self
-        segment = new(dir, first_index, _recover: true)
-        segment
-      end
-
-      protected def initialize(@dir : String, @first_index : UInt64, *, _recover : Bool)
-        @last_index = @first_index - 1
-        path = File.join(@dir, segment_filename)
-        @file = MFile.new(path)
+        path = ::File.join(@dir, segment_filename)
+        @file = ::File.new(path, "a+")
         recover
       end
 
-      def has_capacity_for?(bytesize : Int) : Bool
-        @file.size + bytesize <= @file.capacity
+      def self.open(dir : String, first_index : UInt64) : self
+        new(dir, first_index)
       end
 
       def append(entry : LogEntry(T))
-        @offsets << @file.size.to_u64
+        offset = @size
         entry.to_io(@file)
+        @file.flush
+        @file.fsync
+        @offsets << offset.to_u64
+        @size = @file.size
         @last_index = entry.index
         @count += 1
       end
@@ -53,15 +46,16 @@ module Raft
         return if index < @first_index
         offset_idx = (index - @first_index + 1).to_i32
         new_size = if offset_idx < @offsets.size
-                     @offsets[offset_idx]
+                     @offsets[offset_idx].to_i64
                    else
-                     @file.size
+                     @size
                    end
-        @file.truncate(new_size.to_i64)
+        @file.truncate(new_size)
+        @file.fsync
         @offsets = @offsets[0...offset_idx]
         @count = offset_idx.to_u32
         @last_index = index
-        @file.seek(new_size)
+        @size = new_size
       end
 
       def close
@@ -69,12 +63,11 @@ module Raft
       end
 
       protected def recover
-        file_size = @file.size
-        @file.seek(0)
-
         @offsets.clear
         @count = 0_u32
         @last_index = @first_index - 1
+        file_size = @file.size
+        @file.seek(0)
         valid_end = 0_i64
 
         while @file.pos < file_size
@@ -86,16 +79,17 @@ module Raft
             @count += 1
             valid_end = @file.pos.to_i64
           rescue ex
-            # Partial entry — truncate file to last valid position
+            # Torn write or corruption — drop everything past the last valid entry.
             ::Log.warn { "Truncating partial entry at offset #{offset} in segment starting at index #{@first_index}: #{ex.message}" }
             break
           end
         end
 
-        # Resize to actual valid data (matters if process crashed —
-        # file may be capacity-sized with garbage at the tail)
-        @file.resize(valid_end)
-        @file.seek(valid_end)
+        if valid_end < file_size
+          @file.truncate(valid_end)
+          @file.fsync
+        end
+        @size = valid_end
       end
 
       private def segment_filename : String

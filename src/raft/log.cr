@@ -21,8 +21,8 @@ module Raft
       entry.to_io(io)
       bytesize = io.pos
 
-      unless current_segment.has_capacity_for?(bytesize)
-        new_segment(@last_index, bytesize)
+      if current_segment.size > 0 && current_segment.size + bytesize > @config.max_segment_size
+        new_segment(@last_index)
       end
 
       current_segment.append(entry)
@@ -105,9 +105,8 @@ module Raft
       @segments.last
     end
 
-    private def new_segment(first_index : UInt64, min_bytesize : Int = 0)
-      capacity = Math.max(@config.max_segment_size.to_i64, min_bytesize.to_i64)
-      @segments << Segment(T).new(@config.data_dir, first_index: first_index, capacity: capacity)
+    private def new_segment(first_index : UInt64)
+      @segments << Segment(T).new(@config.data_dir, first_index: first_index)
     end
 
     private def segment_for(index : UInt64) : Segment(T)
