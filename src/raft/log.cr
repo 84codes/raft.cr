@@ -11,6 +11,10 @@ module Raft
       recover_segments
     end
 
+    def sync
+      @segments.last.sync unless @segments.empty?
+    end
+
     def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal, config_data : Bytes = Bytes.new(0)) : LogEntry(T)
       @last_index += 1
       @last_term = term
@@ -36,6 +40,17 @@ module Raft
 
     def term_at(index : UInt64) : UInt64
       get(index).term
+    end
+
+    # Resolve `index` to {segment_fd, byte_offset, byte_length} for zero-copy
+    # senders (e.g., sendfile/splice/io_uring). Returns nil if the index has
+    # been compacted away or is past EOF.
+    def byte_range_for(index : UInt64) : {Int32, UInt64, UInt32}?
+      return nil if index < first_index
+      return nil if index > @last_index
+      seg = segment_for(index)
+      offset, length = seg.byte_range_for(index)
+      {seg.fd, offset, length}
     end
 
     def truncate_after(index : UInt64)
@@ -136,6 +151,10 @@ module Raft
           last_seg = @segments.last
           @last_index = last_seg.last_index
           @last_term = last_seg.count > 0 ? get(@last_index).term : 0_u64
+          # Restore appendability on the active (last) segment: close-truncate
+          # shrunk it to @logical_size; re-extend back to max_segment_size so
+          # the next append doesn't immediately rotate to a new segment.
+          last_seg.expand_to(@config.max_segment_size.to_i64)
         end
       end
     end
