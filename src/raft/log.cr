@@ -1,11 +1,14 @@
+require "./config"
 require "./message"
+require "./log_entry"
+require "./log/segment"
 
 module Raft
   class Log(T)
     getter last_index : UInt64 = 0_u64
     getter last_term : UInt64 = 0_u64
 
-    @segments : Array(Segment(T)) = [] of Segment(T)
+    @segments = Array(Segment(T)).new
     @config : Config
 
     def initialize(@config : Config)

@@ -1,3 +1,5 @@
+require "./config"
+
 module Raft
   enum EntryType : UInt8
     Normal        = 0
@@ -55,7 +57,7 @@ module Raft
       @success : Bool = false,
       @reject_hint : UInt64 = 0_u64,
       @entries_data : Bytes = Bytes.new(0),
-      @entries_count : UInt32 = 0_u32
+      @entries_count : UInt32 = 0_u32,
     )
     end
 

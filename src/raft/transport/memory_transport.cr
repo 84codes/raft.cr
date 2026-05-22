@@ -1,3 +1,5 @@
+require "../transport"
+
 module Raft
   class MemoryTransport < Transport
     @channels = Hash({UInt64, NodeID}, Channel(Message)).new

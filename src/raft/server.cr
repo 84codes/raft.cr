@@ -1,3 +1,8 @@
+require "./config"
+require "./message"
+require "./state_machine"
+require "./node"
+
 module Raft
   class Server(T)
     @nodes : Hash(UInt64, Node(T)) = {} of UInt64 => Node(T)

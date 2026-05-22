@@ -1,4 +1,5 @@
 require "file_utils"
+require "../log_entry"
 
 module Raft
   class Log(T)

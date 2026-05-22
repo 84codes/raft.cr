@@ -1,3 +1,11 @@
+require "./config"
+require "./message"
+require "./peer"
+require "./metrics"
+require "./state_machine"
+require "./log"
+require "./log/segment"
+
 module Raft
   class Node(T)
     getter role : Role = Role::Follower
@@ -186,7 +194,7 @@ module Raft
       @leader_id = @id
       config_bytes = serialize_peers
       @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
-      @commit_index = @log.last_index  # single-node cluster, immediately committed
+      @commit_index = @log.last_index # single-node cluster, immediately committed
       persist_state
       true
     end
@@ -286,7 +294,7 @@ module Raft
     end
 
     private def start_pre_vote
-      return if @peers.empty? # standalone node, no elections
+      return if @peers.empty?                                   # standalone node, no elections
       return unless @peers.any? { |p| p.id == @id && p.voter? } # learners don't elect
       @election_tick = 0_u32
       @election_timeout = random_election_timeout

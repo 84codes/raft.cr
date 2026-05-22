@@ -1,4 +1,5 @@
 require "socket"
+require "../transport"
 
 module Raft
   class TCPTransport < Transport
