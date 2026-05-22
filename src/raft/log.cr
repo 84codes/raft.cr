@@ -1,3 +1,5 @@
+require "./message"
+
 module Raft
   class Log(T)
     getter last_index : UInt64 = 0_u64
@@ -16,12 +18,7 @@ module Raft
       @last_term = term
       entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data, config_data: config_data)
 
-      # Serialize to get the byte size, then check if it fits
-      io = IO::Memory.new
-      entry.to_io(io)
-      bytesize = io.pos
-
-      if current_segment.size > 0 && current_segment.size + bytesize > @config.max_segment_size
+      if current_segment.size > 0 && current_segment.size + entry.bytesize > @config.max_segment_size
         new_segment(@last_index)
       end
 

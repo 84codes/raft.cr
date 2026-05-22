@@ -29,7 +29,7 @@ module Raft
         @file.flush
         @file.fsync
         @offsets << offset.to_u64
-        @size = @file.size
+        @size += entry.bytesize
         @last_index = entry.index
         @count += 1
       end

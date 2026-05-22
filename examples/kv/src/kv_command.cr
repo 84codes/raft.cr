@@ -13,6 +13,10 @@ struct KVCommand
   def initialize(@action : KVAction, @key : String, @value : String = "")
   end
 
+  def bytesize : Int32
+    sizeof(UInt8) + sizeof(UInt32) + @key.bytesize + sizeof(UInt32) + @value.bytesize
+  end
+
   def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
     io.write_bytes(@action.value, format)
     io.write_bytes(@key.bytesize.to_u32, format)
