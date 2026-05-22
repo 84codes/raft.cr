@@ -1,3 +1,4 @@
+require "sync/mutex"
 require "./config"
 
 module Raft
@@ -6,10 +7,10 @@ module Raft
 
     @node_id : NodeID
     @group_id : UInt64
-    @gauges : Hash(String, Int64) = {} of String => Int64
-    @counters : Hash(String, Int64) = {} of String => Int64
+    @gauges : Hash(String, Int64) = Hash(String, Int64).new(0_i64)
+    @counters : Hash(String, Int64) = Hash(String, Int64).new(0_i64)
     @histograms : Hash(String, HistogramData) = {} of String => HistogramData
-    @mutex : Mutex = Mutex.new
+    @mutex : Sync::Mutex = Sync::Mutex.new
 
     struct HistogramData
       property buckets : Array(Int64)
@@ -28,24 +29,26 @@ module Raft
     end
 
     def set_gauge(name : String, value : Int64)
-      @gauges[name] = value
+      @mutex.synchronize { @gauges[name] = value }
     end
 
     def get_gauge(name : String) : Int64
-      @gauges.fetch(name, 0_i64)
+      @mutex.synchronize { @gauges[name] }
     end
 
     def increment(name : String, by : Int64 = 1_i64)
-      @counters[name] = @counters.fetch(name, 0_i64) + by
+      @mutex.synchronize { @counters.update(name) { |v| v + by } }
     end
 
     def increment(name : String, labels : Hash(String, String), by : Int64 = 1_i64)
-      key = "#{name}{#{labels.map { |k, v| "#{k}=\"#{v}\"" }.join(",")}}"
-      @counters[key] = @counters.fetch(key, 0_i64) + by
+      @mutex.synchronize do
+        key = "#{name}{#{labels.map { |k, v| "#{k}=\"#{v}\"" }.join(",")}}"
+        @counters.update(key) { |v| v + by }
+      end
     end
 
     def get_counter(name : String) : Int64
-      @counters.fetch(name, 0_i64)
+      @mutex.synchronize { @counters[name] }
     end
 
     def observe(name : String, value : Float64, labels : Hash(String, String) = {} of String => String)

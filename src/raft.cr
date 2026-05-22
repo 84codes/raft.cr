@@ -1,3 +1,7 @@
+require "sync/exclusive"
+require "sync/shared"
+require "sync/mutex"
+
 module Raft
   VERSION = "0.1.0"
 end

@@ -2,6 +2,9 @@ require "spec"
 require "file_utils"
 require "../src/raft"
 
+count = Fiber::ExecutionContext.default_workers_count
+Fiber::ExecutionContext.default.resize(count)
+
 struct TestData
   getter value : String
 
