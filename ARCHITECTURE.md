@@ -20,7 +20,7 @@ A fast, embeddable Raft consensus library for Crystal. The library implements th
 - Single-server membership changes with **learners** (non-voting members)
 - Leadership transfer
 - Multi-raft on a single shared transport
-- Segmented, append-only log on disk (regular files; `pread`/`pwrite` based)
+- Segmented, append-only log on disk (regular files; POSIX `O_APPEND` + stdlib buffered writes; `pread`-based reads)
 - Explicit fsync discipline at every Raft durability boundary
 - Prometheus metrics
 
@@ -247,28 +247,25 @@ classDiagram
 
 These classes do touch the filesystem and the network. They are kept dependency-light: nothing in this layer knows about `Node` or the Raft protocol. They expose primitive operations and let the layer above orchestrate.
 
-### Segment storage: regular files + `pread`/`pwrite`
+### Segment storage: append-mode files + stdlib buffered writes
 
-Log segments are plain regular files. Reads go through stdlib `File#read_at` (which uses `pread(2)` internally — concurrent-read-safe, no shared file-position state). Writes go through `File#write_at`, a small POSIX `pwrite(2)` extension added in `src/raft/file_write_at.cr` that mirrors stdlib's `read_at` (two overloads: direct-`Bytes` and block-yielding-`IO`).
+Log segments are plain regular files opened with POSIX append mode (`File.new(path, "a+")`). Every write atomically lands at EOF — the kernel maintains the write offset and updates it atomically per `write(2)` syscall, so no explicit positioning is needed in user space. Crystal's `IO::Buffered` accumulates small writes (the per-`LogEntry` header + payload pieces) in a per-File user-space buffer; one `flush` after `entry.to_io(@file)` issues a single `write(2)` syscall per appended entry.
 
-**Pre-allocation.** When opened for write, the segment file is extended to its full `capacity` via `File#truncate(capacity)`. This is a sparse extension on Linux ext4/XFS and macOS APFS — `ls -l` shows the full capacity but `du` shows only the blocks actually written. The sparseness lets the filesystem lay out contiguous extents up front without paying disk for unwritten regions.
+**Reads** go through stdlib `File#read_at` (which uses `pread(2)` internally) — concurrent-read-safe, no shared file-position state with the write path. Multiple followers can have the same segment file being read at different offsets simultaneously without contention.
 
-**Capacity vs. logical size.** `@logical_size : Int64` tracks how many bytes of valid data the file holds; `@capacity : Int64` is the pre-allocated upper bound. `has_capacity_for?(bytesize)` is a cheap arithmetic check (`@logical_size + bytesize <= @capacity`) — no filesystem calls. On `close`, the file is shrunk to `@logical_size` so the next open sees a file whose size equals valid data; on recovery, the active segment is re-extended back to `max_segment_size` via `Segment#expand_to` so it can keep accepting appends.
+**No pre-allocation.** The file grows organically with each append; its physical size always equals its valid-data size. This eliminates the "logical size vs. capacity" split that mmap-based segments required, removes the need for `has_capacity_for?` / `expand_to`, and means recovery has a single stopping condition (parse failure at EOF).
 
-**Zero-copy surface.** `Segment#fd` exposes the raw file descriptor and `Segment#byte_range_for(index) → {offset, length}` resolves an index to its exact byte range. These power `Log#byte_range_for` and are the entry points for a future zero-copy sender (`sendfile(socket, seg.fd, offset, length)`) — the storage layer is `sendfile`/`splice`/`io_uring`-ready even though no consumer uses it today.
+**Zero-copy surface.** `Segment#fd` exposes the raw file descriptor and `Segment#byte_range_for(index) → {offset, length}` resolves an index to its exact byte range. These power `Log#byte_range_for` and are the entry points for a future zero-copy sender (`sendfile(socket, seg.fd, offset, length)`). The storage layer is `sendfile`/`splice`/`io_uring`-ready though no consumer uses it today.
 
 ### `Raft::Log::Segment(T)`
 
-One log segment file. Owns a `File`, an in-memory offset array `@offsets : Array(UInt64)` mapping `index → byte offset within the file`, and the `@logical_size` / `@capacity` tracker. A segment can be read by index (O(1) offset lookup, then `File#read_at` to deserialize), appended to (via `File#write_at` from `@logical_size`), or truncated.
+One log segment file. Owns a `File` (in `"a+"` mode), an in-memory offset array `@offsets : Array(UInt64)` mapping `index → byte offset within the file`, and a `@size : Int64` tracking total written bytes. A segment can be read by index (O(1) offset lookup, then `File#read_at` to deserialize), appended to (via `entry.to_io(@file) + flush`, which leverages `IO::Buffered` coalescing), or truncated (via `File#truncate` to shrink the file in place).
 
 The segment filename is the zero-padded first index it contains: `0000000000000001.log`, `0000000000010001.log`, etc. This makes lexicographic directory listing equal to chronological order.
 
-**Recovery on open** (`recover`): scan the file from offset 0, deserializing one `LogEntry(T)` at a time, recording each entry's offset. Two stopping conditions:
+**Recovery on open** (`recover`): walk the file from offset 0, deserializing one `LogEntry(T)` at a time, recording each entry's offset. If a `from_io` call raises (partial trailing entry from a crash mid-write), record the last fully-valid offset and `truncate + fsync` the file back to that offset. The next append then lands cleanly at the truncated EOF.
 
-1. **Parse failure** — a partial trailing entry from a crash mid-write raises during `LogEntry.from_io`; we break and record the last valid offset.
-2. **All-zero entry heuristic** — `EntryType::Normal = 0` and all other `LogEntry` fields are bounded UInts, so 21 zero bytes parse as a structurally valid `LogEntry(term=0, index=0, type=Normal, data_size=0)` without raising. Real entries always satisfy `term ≥ 1 ∧ index ≥ 1` (bootstrap noop is at term=1, index=1), so `entry.term == 0 && entry.index == 0` is a reliable signal that we've hit the pre-allocated zero tail of a crashed segment. Break.
-
-Both paths make recovery idempotent: any tail garbage (parse-failing or zero-filled) is silently dropped, and subsequent appends overwrite from `@logical_size`.
+Since there's no pre-allocation, recovery has exactly one stopping condition: parse failure (or natural EOF when the file is clean). No zero-tail heuristic needed.
 
 ### Durability boundaries
 
@@ -390,7 +387,7 @@ classDiagram
 
 Three things to notice:
 
-1. **`Log` doesn't know about `File`**, only about `Segment`. Storage details (pre-allocation, pwrite, recovery heuristics) are encapsulated.
+1. **`Log` doesn't know about `File`**, only about `Segment`. Storage details (append mode, buffered writes, recovery) are encapsulated.
 2. **`Transport` doesn't know about `Node`.** It sees a `Channel(Message)` and a `group_id` and that's it. This is what lets a host application replace the transport without touching the protocol code.
 3. **There is no shared state between transports and the core** other than the channels and the `Message` values that flow through them.
 
@@ -481,7 +478,7 @@ The application driver is the explicit owner of the loop: it pulls a message fro
 
 ### Shutdown and persistence
 
-- `Node#close` closes the inbox channel and the log (which closes all segments — each `Segment#close` shrinks its file to `@logical_size` so recovery sees a clean stopping point).
+- `Node#close` closes the inbox channel and the log (which closes all segments — since files are opened in append mode, their physical size always equals valid data, so no shrinking is needed on close).
 - `Transport#stop` closes the listener, drains command/outbox channels, and closes peer connections.
 - Crash safety: term/vote/configuration are durable on every change (`persist_state` writes `raft_meta.tmp`, fsyncs, and renames). The log is recovered on next start by `Log#recover_segments` + `Segment#recover`, which truncates any partial trailing entry.
 
@@ -505,18 +502,19 @@ The trade-offs that shape the library's characteristics. Each item is presented 
 
 **Cost:** the application must handle versioning of its own type. There is no built-in schema-evolution story.
 
-### Regular files + `pread`/`pwrite` with sparse pre-allocation
+### Regular files in append mode (`O_APPEND`)
 
-**Decision:** log segments are regular files (one per segment, pre-allocated to `max_segment_size`, default 64 MB) accessed via stdlib `File#read_at` (pread) and a small `File#write_at` extension (pwrite). Segment rollover happens when the next entry would exceed `@capacity`. fsync is called explicitly at Raft's durability boundaries (see §4 "Durability boundaries").
+**Decision:** log segments are regular files opened with POSIX append mode (`File.new(path, "a+")`). Writes go through Crystal's `IO::Buffered` — `entry.to_io(@file)` accumulates bytes in a user-space buffer; `@file.flush` issues one `write(2)` syscall per buffered chunk; O_APPEND ensures each `write(2)` atomically lands at EOF. Reads use stdlib `File#read_at` (pread). Fsync is called explicitly at Raft's durability boundaries (see §4 "Durability boundaries").
 
 **Consequence:**
 
 - The page cache participates fully — hot tip-reads served by recently written pages incur no disk I/O.
-- Both `sendfile`/`splice` (zero-copy network sends) and `io_uring` (batched async I/O) compose with regular-file fds. The library is ready for them; `Segment#fd` and `Log#byte_range_for` expose the surface. Mmap was a dead end here because it can't be the source for `sendfile` or the target for `splice`.
-- Pre-allocation via `File#truncate(capacity)` is sparse on ext4/XFS/APFS — `ls -l` shows the full capacity but on-disk consumption tracks only what's been written. No wasted disk.
-- Concurrent reads of the same segment file are safe because `read_at` (pread) doesn't share file-position state.
+- `IO::Buffered` coalesces small writes within a single append (the `LogEntry`'s header + payload pieces) into one syscall, and can amortize across multiple appends within the buffer's lifetime.
+- Both `sendfile`/`splice` (zero-copy network sends) and `io_uring` (batched async I/O) compose with regular-file fds. The library is ready for them; `Segment#fd` and `Log#byte_range_for` expose the surface.
+- Concurrent reads of the same segment file are safe because `read_at` (pread) doesn't share file-position state with the writer.
+- File size always equals valid-data size — no "logical vs. physical" split, no pre-allocation hazards.
 
-**Cost:** every Raft-level durability boundary triggers an explicit `fsync`. ~1–5 ms per fsync per node per durability boundary on local SSD. On a 3-node cluster that's 3 fsyncs per published message (in parallel). For the queue PoC this works out to a few hundred to a couple thousand messages per second per group — the correctness floor every Raft-replicated store pays. See §6.5 for the full accounting.
+**Cost:** every Raft-level durability boundary triggers an explicit `fsync` — ~1–5 ms per fsync per node per boundary on local SSD. For a 3-node cluster that's 3 fsyncs per published message (in parallel). This is the correctness floor every Raft-replicated store pays. See §6.5 for the full accounting.
 
 ### Linearizable reads via `ReadIndex`
 
@@ -585,7 +583,7 @@ The trade-offs that shape the library's characteristics. Each item is presented 
 ### What is intentionally not optimized (yet)
 
 - **Fsync on every commit advance + every propose + every entry-bearing AppendEntries.** `persist_state` is called on every commit advance, which fsyncs `raft_meta`. `@log.sync` is called from `propose` and `handle_append_entries`. These are the durability boundaries Raft correctness requires; batching them is the next throughput frontier. A future API could group proposals into one batch with a single combined fsync on each side.
-- **No `sendfile` yet** for replication — the regular-file layout supports it (`Log#byte_range_for` returns `(fd, offset, length)`) but the wire path still copies through `IO::Memory`. A separate plan ("zero-copy replication transport") drafts the implementation.
+- **No `sendfile` yet** for replication — the storage layer supports it (`Log#byte_range_for` returns `(fd, offset, length)`) but the wire path still copies through `IO::Memory`. A separate plan ("zero-copy replication transport") drafts the implementation.
 - **Head-of-line blocking on the shared TCP connection.** The single-connection-per-peer design (see "Single TCP connection per peer pair" above) means a slow large message on one group delays everything else on the same connection. The 1 MB `max_append_entries_size` cap mitigates but does not solve this. For the AMQP use case where individual user messages can be much larger than 1 MB, four mitigation paths exist:
   1. **Don't put bodies in the Raft log.** The Raft log carries metadata + a reference; bodies live in a separate per-node store and replicate out-of-band. This is what RabbitMQ quorum queues do via the shared message store and is the recommended pattern for a quorum-queue integration. The Raft library's job is consensus on a small ordered metadata stream; bulk transfer is a separate concern with different requirements.
   2. **Multiple TCP connections per peer pair** — typically a "control" connection (heartbeats, votes, small AppendEntries) plus a "bulk" connection. Cheap to implement, reversible, retains most of the multi-raft connection-count benefit. The right fix when option 1 isn't applicable.
@@ -606,7 +604,7 @@ Honest accounting of what is and isn't implemented relative to the Raft paper an
 | Election restriction | ✅ Implemented | Last-term-then-last-index up-to-date check. |
 | Pre-vote | ✅ Implemented (extension) | Avoids term inflation from partitioned nodes. |
 | Persistent state | ✅ Implemented | Term, vote, and configuration; tmp+rename+fsync. |
-| Crash-safe log | ✅ Implemented | Regular-file segments with explicit fsync at durability boundaries: leader fsyncs in `propose` before `advance_commit_index` (so the leader's own copy is durable before it counts toward quorum); follower fsyncs in `handle_append_entries` before responding `success: true` (so an ack truthfully means "on disk"). `become_leader` no-op and `append_configuration` also fsync to close single-voter data-loss windows. Recovery drops both parse-failing partial entries and zero-tail phantom entries (term=0 ∧ index=0 sentinel). |
+| Crash-safe log | ✅ Implemented | Append-mode segment files with explicit fsync at durability boundaries: leader fsyncs in `propose` before `advance_commit_index` (so the leader's own copy is durable before it counts toward quorum); follower fsyncs in `handle_append_entries` before responding `success: true` (so an ack truthfully means "on disk"). `become_leader` no-op and `append_configuration` also fsync to close single-voter data-loss windows. Recovery drops parse-failing partial entries (one stopping condition; no zero-tail heuristic needed since files aren't pre-allocated). |
 | Single-server membership changes | ✅ Implemented | `add_server` / `remove_server` / `promote_learner`. |
 | Learners (non-voting members) | ✅ Implemented | Auto-promoted when caught up. |
 | Leadership transfer | ✅ Implemented | `transfer_leadership` + `TimeoutNow`. |
@@ -716,7 +714,6 @@ src/raft/
 ├── log_entry.cr            # LogEntry(T) — on-disk/wire format
 ├── message.cr              # Message struct + MessageType / EntryType / Role enums
 ├── metrics.cr              # Prometheus metrics
-├── file_write_at.cr        # POSIX pwrite extension on Crystal's File class
 ├── node.cr                 # Node(T) — the protocol core
 ├── peer.cr                 # Peer struct (id, role, address)
 ├── server.cr               # Server(T) — optional multi-raft glue
