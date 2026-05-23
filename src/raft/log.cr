@@ -20,13 +20,8 @@ module Raft
       @last_term = term
       entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data, config_data: config_data)
 
-      # Serialize to get the byte size, then check if it fits
-      io = IO::Memory.new
-      entry.to_io(io)
-      bytesize = io.pos
-
-      unless current_segment.has_capacity_for?(bytesize)
-        new_segment(@last_index, bytesize)
+      if current_segment.size > 0 && current_segment.size + entry.bytesize > @config.max_segment_size
+        new_segment(@last_index)
       end
 
       current_segment.append(entry)
@@ -120,9 +115,8 @@ module Raft
       @segments.last
     end
 
-    private def new_segment(first_index : UInt64, min_bytesize : Int = 0)
-      capacity = Math.max(@config.max_segment_size.to_i64, min_bytesize.to_i64)
-      @segments << Segment(T).new(@config.data_dir, first_index: first_index, capacity: capacity)
+    private def new_segment(first_index : UInt64)
+      @segments << Segment(T).new(@config.data_dir, first_index: first_index)
     end
 
     private def segment_for(index : UInt64) : Segment(T)
@@ -151,10 +145,6 @@ module Raft
           last_seg = @segments.last
           @last_index = last_seg.last_index
           @last_term = last_seg.count > 0 ? get(@last_index).term : 0_u64
-          # Restore appendability on the active (last) segment: close-truncate
-          # shrunk it to @logical_size; re-extend back to max_segment_size so
-          # the next append doesn't immediately rotate to a new segment.
-          last_seg.expand_to(@config.max_segment_size.to_i64)
         end
       end
     end
