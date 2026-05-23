@@ -57,6 +57,9 @@ module Raft
         @peers = peers.map { |pid| Peer.new(pid) } + [Peer.new(@id)]
       end
       @log = Log(T).new(@config)
+      if seed = @config.random_seed
+        @random = Random.new(seed)
+      end
       @election_timeout = random_election_timeout
       recover_state
     end

@@ -36,6 +36,10 @@ def build_5_node_cluster(seed : UInt64, base_dir : String) : Hash(Raft::NodeID, 
     cfg.election_timeout_max_ticks = cfg_template.election_timeout_max_ticks
     cfg.heartbeat_ticks = cfg_template.heartbeat_ticks
     cfg.data_dir = File.join(base_dir, "n#{id}")
+    # Deterministic per-node seed derived from the test seed. Without this,
+    # Node#random_election_timeout used Random.new (OS entropy) and the
+    # simulator's "200 seeds" were not reproducible across runs (F2).
+    cfg.random_seed = seed * 1_000_u64 + id
     Dir.mkdir_p(cfg.data_dir)
     peers = (1_u64..5_u64).reject { |x| x == id }.to_a
     sm = TestStateMachine.new
