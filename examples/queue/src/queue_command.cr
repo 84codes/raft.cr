@@ -14,6 +14,13 @@ struct QueueCommand
   def initialize(@action : QueueAction, @queue_name : String, @body : Bytes = Bytes.new(0), @req_id : String = "")
   end
 
+  def bytesize : Int32
+    sizeof(UInt8) +
+      sizeof(UInt32) + @queue_name.bytesize +
+      sizeof(UInt32) + @body.size +
+      sizeof(UInt32) + @req_id.bytesize
+  end
+
   def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
     io.write_bytes(@action.value, format)
     io.write_bytes(@queue_name.bytesize.to_u32, format)
