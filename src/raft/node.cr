@@ -302,6 +302,15 @@ module Raft
       @pre_votes_received.add(@id) # vote for self
       @metrics.try(&.increment("raft_prevote_campaigns_total"))
 
+      # Single-voter clusters reach quorum on the self-vote alone — promote
+      # without waiting for a PreVoteResponse that no other voter could send.
+      # Without this, a single-node cluster cannot re-elect itself after
+      # restart (recover_state leaves role=Follower).
+      if @pre_votes_received.size >= quorum_size
+        become_candidate
+        return
+      end
+
       other_voters.each do |peer|
         @outbox << {peer.id, Message.new(
           type: MessageType::PreVote,
@@ -326,6 +335,12 @@ module Raft
       @metrics.try(&.increment("raft_elections_total"))
       @metrics.try(&.increment("raft_term_changes_total", {"reason" => "election"}))
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "candidate"}))
+
+      # Single-voter shortcut: same rationale as in start_pre_vote.
+      if @votes_received.size >= quorum_size
+        become_leader
+        return
+      end
 
       other_voters.each do |peer|
         @outbox << {peer.id, Message.new(
