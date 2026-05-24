@@ -27,7 +27,10 @@ module Raft
       def append(entry : LogEntry(T))
         @offsets << @size.to_u64
         entry.to_io(@file)
-        @file.flush
+        # Flush is deferred to sync (at Raft durability boundary) so that batched
+        # AppendEntries replication issues O(1) write(2) syscalls per batch
+        # instead of O(N). IO::Buffered keeps the in-flight bytes in user space
+        # until sync flushes them all at once.
         @size += entry.bytesize
         @last_index = entry.index
         @count += 1
@@ -39,6 +42,10 @@ module Raft
         start = @offsets[offset_idx]
         finish = offset_idx + 1 < @offsets.size ? @offsets[offset_idx + 1] : @size.to_u64
         length = (finish - start).to_i64
+        # read_at uses pread(2) which bypasses IO::Buffered's user-space buffer.
+        # Flush any pending writes to the kernel first so pread sees them.
+        # On the normal Raft path (sync already called) this is a no-op.
+        @file.flush
         @file.read_at(start.to_i64, length) do |io|
           LogEntry(T).from_io(io)
         end
@@ -53,6 +60,9 @@ module Raft
                    else
                      @size
                    end
+        # Push any buffered writes to the kernel before changing EOF; otherwise
+        # the next flush would append past the truncated EOF.
+        @file.flush
         @file.truncate(new_size)
         @offsets = @offsets[0...offset_idx]
         @count = offset_idx.to_u32
@@ -60,9 +70,11 @@ module Raft
         @size = new_size
       end
 
-      # Flush dirty page-cache pages for this segment to the device. Called
-      # from the Raft commit path at durability boundaries.
+      # Push buffered writes to the kernel page cache, then flush page cache to
+      # the device. Called at Raft durability boundaries (see Node#propose,
+      # Node#handle_append_entries, etc.). Two syscalls (write + fsync) per call.
       def sync
+        @file.flush
         @file.fsync
       end
 

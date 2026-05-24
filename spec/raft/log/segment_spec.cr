@@ -178,7 +178,10 @@ describe Raft::Log::Segment do
     seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first")))
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second")))
-    # Simulate crash: do NOT close. Append garbage bytes to file.
+    # Simulate crash: flush to kernel (as sync does at the Raft boundary) so
+    # the two valid entries reach the file, then append garbage without close
+    # to represent a partial trailing write at crash time.
+    seg.sync
     path = Dir.glob(File.join(dir, "*.log")).first
     File.open(path, "ab") do |f|
       f.write(Bytes[0xDE, 0xAD, 0xBE, 0xEF])
