@@ -66,7 +66,6 @@ flowchart TB
     Node -->|"apply(entry)"| SM
     Node --> Log
     Log --> Seg
-    Seg --> MF
     Loop -->|"drain outbox"| Tr
     Tr -->|"channel per group"| Node
     TCP -.implements.-> Tr
