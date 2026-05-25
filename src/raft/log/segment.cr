@@ -9,7 +9,7 @@ module Raft
       getter count : UInt32 = 0_u32
       getter size : Int64 = 0_i64
 
-      @offsets : Array(UInt64) = [] of UInt64
+      @offsets = Array(UInt64).new
       @file : ::File
       @dir : String
 
