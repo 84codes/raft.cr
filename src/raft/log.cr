@@ -21,6 +21,10 @@ module Raft
       entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data, config_data: config_data)
 
       if current_segment.size > 0 && current_segment.size + entry.bytesize > @config.max_segment_size
+        # fsync the segment we're about to leave — Log#sync only touches the
+        # current (last) segment, so without this the previous segment's
+        # buffered tail would never reach disk.
+        current_segment.sync
         new_segment(@last_index)
       end
 
