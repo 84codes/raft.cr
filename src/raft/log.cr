@@ -3,7 +3,7 @@ module Raft
     getter last_index : UInt64 = 0_u64
     getter last_term : UInt64 = 0_u64
 
-    @segments : Array(Segment(T)) = [] of Segment(T)
+    @segments = Array(Segment(T)).new
     @config : Config
 
     def initialize(@config : Config)
@@ -11,18 +11,21 @@ module Raft
       recover_segments
     end
 
+    def sync
+      @segments.last.sync unless @segments.empty?
+    end
+
     def append(term : UInt64, data : T? = nil, entry_type : EntryType = EntryType::Normal, config_data : Bytes = Bytes.new(0)) : LogEntry(T)
       @last_index += 1
       @last_term = term
       entry = LogEntry(T).new(term: term, index: @last_index, entry_type: entry_type, data: data, config_data: config_data)
 
-      # Serialize to get the byte size, then check if it fits
-      io = IO::Memory.new
-      entry.to_io(io)
-      bytesize = io.pos
-
-      unless current_segment.has_capacity_for?(bytesize)
-        new_segment(@last_index, bytesize)
+      if current_segment.size > 0 && current_segment.size + entry.bytesize > @config.max_segment_size
+        # fsync the segment we're about to leave — Log#sync only touches the
+        # current (last) segment, so without this the previous segment's
+        # buffered tail would never reach disk.
+        current_segment.sync
+        new_segment(@last_index)
       end
 
       current_segment.append(entry)
@@ -36,6 +39,17 @@ module Raft
 
     def term_at(index : UInt64) : UInt64
       get(index).term
+    end
+
+    # Resolve `index` to {segment_fd, byte_offset, byte_length} for zero-copy
+    # senders (e.g., sendfile/splice/io_uring). Returns nil if the index has
+    # been compacted away or is past EOF.
+    def byte_range_for(index : UInt64) : {Int32, UInt64, UInt32}?
+      return nil if index < first_index
+      return nil if index > @last_index
+      seg = segment_for(index)
+      offset, length = seg.byte_range_for(index)
+      {seg.fd, offset, length}
     end
 
     def truncate_after(index : UInt64)
@@ -105,9 +119,8 @@ module Raft
       @segments.last
     end
 
-    private def new_segment(first_index : UInt64, min_bytesize : Int = 0)
-      capacity = Math.max(@config.max_segment_size.to_i64, min_bytesize.to_i64)
-      @segments << Segment(T).new(@config.data_dir, first_index: first_index, capacity: capacity)
+    private def new_segment(first_index : UInt64)
+      @segments << Segment(T).new(@config.data_dir, first_index: first_index)
     end
 
     private def segment_for(index : UInt64) : Segment(T)
