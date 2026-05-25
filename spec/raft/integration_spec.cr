@@ -272,6 +272,46 @@ describe "Integration: 3-node Raft cluster" do
     nodes.each_value(&.close)
   end
 
+  it "step_down picks the most-caught-up follower and transfers leadership" do
+    nodes, sms = make_cluster
+
+    # Elect node 1
+    5.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    nodes[1_u64].role.should eq Raft::Role::Leader
+
+    # Commit a few entries so all followers' match_index is non-zero
+    nodes[1_u64].propose(TestData.new("a"))
+    nodes[1_u64].propose(TestData.new("b"))
+    deliver_all(nodes)
+    2.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+
+    # Step down — should pick one of nodes 2 or 3.
+    target = nodes[1_u64].step_down
+    target.should_not be_nil
+    [2_u64, 3_u64].should contain(target.not_nil!)
+    deliver_all(nodes)
+
+    # The picked target should be the new leader.
+    new_leader = nodes[target.not_nil!]
+    new_leader.role.should eq Raft::Role::Leader
+
+    # Node 1 should have stepped down.
+    nodes[1_u64].role.should eq Raft::Role::Follower
+
+    nodes.each_value(&.close)
+  end
+
+  it "step_down returns nil when called on a follower" do
+    nodes, sms = make_cluster
+
+    # No election driven; all start as followers.
+    nodes[2_u64].step_down.should be_nil
+
+    nodes.each_value(&.close)
+  end
+
   it "committed data survives partition and re-election" do
     nodes, sms = make_cluster
 

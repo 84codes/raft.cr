@@ -244,6 +244,20 @@ module Raft
       true
     end
 
+    # Step down as leader by picking the most-caught-up voter peer and
+    # transferring leadership to it. Returns the target NodeID on success,
+    # or nil if not leader, no eligible peers exist, or no peer has any
+    # replicated entries yet. Used for graceful rolling restarts.
+    def step_down : NodeID?
+      return nil unless @role == Role::Leader
+      candidates = other_voters
+      return nil if candidates.empty?
+      best = candidates.max_by? { |p| @match_index.fetch(p.id, 0_u64) }
+      return nil unless best
+      target = best.id
+      transfer_leadership(to: target) ? target : nil
+    end
+
     # Bootstrap this node as a single-node cluster.
     # Only works when the node has no peers (fresh start).
     def bootstrap : Bool
