@@ -7,6 +7,10 @@ struct BenchData
   def initialize(@value : String)
   end
 
+  def bytesize : Int32
+    sizeof(UInt32) + @value.bytesize
+  end
+
   def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
     io.write_bytes(@value.bytesize.to_u32, format)
     io.write(@value.to_slice)

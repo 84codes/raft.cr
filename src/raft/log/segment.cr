@@ -1,5 +1,5 @@
 require "file_utils"
-require "../file_write_at"
+require "../log_entry"
 
 module Raft
   class Log(T)
@@ -7,44 +7,31 @@ module Raft
       getter first_index : UInt64
       getter last_index : UInt64
       getter count : UInt32 = 0_u32
+      getter size : Int64 = 0_i64
 
       @offsets : Array(UInt64) = [] of UInt64
-      @file : File
-      @logical_size : Int64 = 0_i64
-      @capacity : Int64
+      @file : ::File
       @dir : String
 
-      def initialize(@dir : String, @first_index : UInt64, capacity : Int64)
+      def initialize(@dir : String, @first_index : UInt64)
         @last_index = @first_index - 1
-        @capacity = capacity
-        path = File.join(@dir, segment_filename)
-        @file = File.new(path, mode: "w+")
-        @file.truncate(@capacity)
-      end
-
-      def self.open(dir : String, first_index : UInt64) : self
-        segment = new(dir, first_index, _recover: true)
-        segment
-      end
-
-      protected def initialize(@dir : String, @first_index : UInt64, *, _recover : Bool)
-        @last_index = @first_index - 1
-        path = File.join(@dir, segment_filename)
-        @file = File.new(path, mode: "r+")
-        @capacity = @file.size.to_i64
+        path = ::File.join(@dir, segment_filename)
+        @file = ::File.new(path, "a+")
         recover
       end
 
-      def has_capacity_for?(bytesize : Int) : Bool
-        @logical_size + bytesize <= @capacity
+      def self.open(dir : String, first_index : UInt64) : self
+        new(dir, first_index)
       end
 
       def append(entry : LogEntry(T))
-        @offsets << @logical_size.to_u64
-        bytes_written = @file.write_at(@logical_size) do |io|
-          entry.to_io(io)
-        end
-        @logical_size += bytes_written
+        @offsets << @size.to_u64
+        entry.to_io(@file)
+        # Flush is deferred to sync (at Raft durability boundary) so that batched
+        # AppendEntries replication issues O(1) write(2) syscalls per batch
+        # instead of O(N). IO::Buffered keeps the in-flight bytes in user space
+        # until sync flushes them all at once.
+        @size += entry.bytesize
         @last_index = entry.index
         @count += 1
       end
@@ -53,8 +40,12 @@ module Raft
         offset_idx = (index - @first_index).to_i32
         raise IndexError.new("Index #{index} out of range") if offset_idx < 0 || offset_idx >= @offsets.size
         start = @offsets[offset_idx]
-        finish = offset_idx + 1 < @offsets.size ? @offsets[offset_idx + 1] : @logical_size.to_u64
+        finish = offset_idx + 1 < @offsets.size ? @offsets[offset_idx + 1] : @size.to_u64
         length = (finish - start).to_i64
+        # read_at uses pread(2) which bypasses IO::Buffered's user-space buffer.
+        # Flush any pending writes to the kernel first so pread sees them.
+        # On the normal Raft path (sync already called) this is a no-op.
+        @file.flush
         @file.read_at(start.to_i64, length) do |io|
           LogEntry(T).from_io(io)
         end
@@ -65,32 +56,25 @@ module Raft
         return if index < @first_index
         offset_idx = (index - @first_index + 1).to_i32
         new_size = if offset_idx < @offsets.size
-                     @offsets[offset_idx]
+                     @offsets[offset_idx].to_i64
                    else
-                     @logical_size.to_u64
+                     @size
                    end
-        @logical_size = new_size.to_i64
+        # Push any buffered writes to the kernel before changing EOF; otherwise
+        # the next flush would append past the truncated EOF.
+        @file.flush
+        @file.truncate(new_size)
         @offsets = @offsets[0...offset_idx]
         @count = offset_idx.to_u32
         @last_index = index
-        # File stays at @capacity bytes physically; @logical_size tracks valid
-        # data. Trailing bytes are garbage and never read since @offsets only
-        # references valid ranges.
+        @size = new_size
       end
 
-      # Re-extends a recovered segment's file to a new (larger) capacity so it
-      # can continue accepting appends. No-op if new_capacity <= @capacity. Used
-      # by Log#recover_segments on the active segment to restore appendability
-      # after a close+reopen cycle.
-      def expand_to(new_capacity : Int64)
-        return if new_capacity <= @capacity
-        @file.truncate(new_capacity)
-        @capacity = new_capacity
-      end
-
-      # Flush dirty page-cache pages for this segment to the device. Called
-      # from the Raft commit path at durability boundaries.
+      # Push buffered writes to the kernel page cache, then flush page cache to
+      # the device. Called at Raft durability boundaries (see Node#propose,
+      # Node#handle_append_entries, etc.). Two syscalls (write + fsync) per call.
       def sync
+        @file.flush
         @file.fsync
       end
 
@@ -101,8 +85,7 @@ module Raft
       end
 
       # Byte range within this segment file occupied by the entry at `index`.
-      # Returns {offset, length}. Future zero-copy senders use this to compute
-      # sendfile arguments.
+      # Returns {offset, length}.
       def byte_range_for(index : UInt64) : {UInt64, UInt32}
         offset_idx = (index - @first_index).to_i32
         raise IndexError.new("Index #{index} out of range") if offset_idx < 0 || offset_idx >= @offsets.size
@@ -110,16 +93,12 @@ module Raft
         finish = if offset_idx + 1 < @offsets.size
                    @offsets[offset_idx + 1]
                  else
-                   @logical_size.to_u64
+                   @size.to_u64
                  end
         {start, (finish - start).to_u32}
       end
 
       def close
-        # Truncate the file to the valid-data size so that on the next open
-        # File#size returns exactly @logical_size, giving recovery a clean
-        # sentinel for recovery.
-        @file.truncate(@logical_size)
         @file.close
       end
 
@@ -127,32 +106,32 @@ module Raft
         @offsets.clear
         @count = 0_u32
         @last_index = @first_index - 1
-        @logical_size = 0_i64
-        cursor = 0_i64
+        file_size = @file.size
+        @file.seek(0)
+        valid_end = 0_i64
 
-        while cursor < @capacity
-          offset = cursor.to_u64
+        while @file.pos < file_size
+          offset = @file.pos.to_u64
           begin
-            # Read forward via the file's position-based IO (one-shot during
-            # recovery is fine; we're not concurrent here).
-            @file.seek(cursor)
             entry = LogEntry(T).from_io(@file)
-            # Heuristic stop: real entries always have term >= 1 AND index >= 1
-            # (bootstrap noop is the first real entry at term=1 index=1). An all-zero
-            # parse means we hit the pre-allocated zero tail of a crashed segment.
-            break if entry.term == 0_u64 && entry.index == 0_u64
             @offsets << offset
             @last_index = entry.index
             @count += 1
-            cursor = @file.tell.to_i64
-            @logical_size = cursor
+            valid_end = @file.pos.to_i64
           rescue ex
-            # Partial trailing entry, or non-zero garbage tail. Stop —
-            # future appends overwrite from @logical_size onward.
+            # Partial trailing entry from a crash — truncate the file back to the
+            # last fully-valid offset. Fsync once since this is a one-time
+            # recovery operation.
             ::Log.warn { "Truncating partial entry at offset #{offset} in segment starting at index #{@first_index}: #{ex.message}" }
             break
           end
         end
+
+        if valid_end < file_size
+          @file.truncate(valid_end)
+          @file.fsync
+        end
+        @size = valid_end
       end
 
       private def segment_filename : String

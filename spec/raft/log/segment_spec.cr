@@ -4,7 +4,7 @@ describe Raft::Log::Segment do
   it "appends and reads back entries" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
 
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
@@ -21,25 +21,10 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
-  it "reports capacity correctly" do
-    dir = File.tempname("raft_segment")
-    Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 50_i64)
-
-    entry = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("hello"))
-    segment.has_capacity_for?(30).should eq true
-    segment.append(entry)
-    # After writing ~30 bytes, no room for another ~30 byte entry in 50 byte segment
-    segment.has_capacity_for?(30).should eq false
-
-    segment.close
-    FileUtils.rm_rf(dir)
-  end
-
   it "truncates in place and reads remaining entries" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
 
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
@@ -64,7 +49,7 @@ describe Raft::Log::Segment do
   it "truncated segment file is smaller on disk" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
 
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
@@ -100,7 +85,7 @@ describe Raft::Log::Segment do
   it "truncate_to recovers correctly after reopen" do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
 
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("alpha"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("beta"))
@@ -127,7 +112,7 @@ describe Raft::Log::Segment do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
 
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     entry1 = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first"))
     entry2 = Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second"))
     segment.append(entry1)
@@ -154,7 +139,7 @@ describe Raft::Log::Segment do
     Dir.mkdir_p(dir)
 
     # Create a segment so the file exists, then close it
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     segment.close
 
     # Write garbage to the empty segment file
@@ -174,7 +159,7 @@ describe Raft::Log::Segment do
     dir = File.tempname("raft_segment")
     Dir.mkdir_p(dir)
 
-    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
+    segment = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     entry = Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("persist"))
     segment.append(entry)
     segment.close
@@ -187,44 +172,20 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
-  it "recovers correctly from a pre-allocated file that was never appended to (clean close)" do
-    dir = File.tempname("seg_empty_recover")
-    Dir.mkdir_p(dir)
-    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
-    seg.close
-
-    seg2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
-    seg2.count.should eq 0_u32
-    seg2.last_index.should eq 0_u64
-    seg2.close
-    FileUtils.rm_rf(dir)
-  end
-
-  it "recovers correctly from a crash-without-close (full capacity, zero-filled tail)" do
-    dir = File.tempname("seg_crash_recover")
-    Dir.mkdir_p(dir)
-    # Manually create a capacity-sized zero-filled file as if a process crashed before close.
-    path = File.join(dir, "%016d.log" % 1_u64)
-    File.open(path, "w+") do |f|
-      f.truncate(2048_i64)  # 2 KB of zeros
-    end
-
-    seg = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
-    seg.count.should eq 0_u32
-    seg.last_index.should eq 0_u64
-    seg.close
-    FileUtils.rm_rf(dir)
-  end
-
-  it "recovers correctly after a crash mid-append (valid entries + zero tail)" do
+  it "recovers correctly from a partially-written file (truncates parse-failing tail)" do
     dir = File.tempname("seg_partial_recover")
     Dir.mkdir_p(dir)
-    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 4096_i64)
+    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("first")))
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("second")))
-    # Simulate crash: DO NOT call seg.close (which would truncate). Just open a new segment
-    # pointing at the same file. The file is still at full 4096-byte capacity with a zero tail
-    # beyond the 2 valid entries.
+    # Simulate crash: flush to kernel (as sync does at the Raft boundary) so
+    # the two valid entries reach the file, then append garbage without close
+    # to represent a partial trailing write at crash time.
+    seg.sync
+    path = Dir.glob(File.join(dir, "*.log")).first
+    File.open(path, "ab") do |f|
+      f.write(Bytes[0xDE, 0xAD, 0xBE, 0xEF])
+    end
 
     seg2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
     seg2.count.should eq 2_u32
@@ -235,29 +196,10 @@ describe Raft::Log::Segment do
     FileUtils.rm_rf(dir)
   end
 
-  it "expand_to re-extends capacity for continued appends" do
-    dir = File.tempname("seg_expand")
-    Dir.mkdir_p(dir)
-    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 1024_i64)
-    seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("a")))
-    seg.close
-    # File on disk is now shrunk to the size of one entry.
-
-    seg2 = Raft::Log::Segment(TestData).open(dir, first_index: 1_u64)
-    seg2.has_capacity_for?(100).should be_false  # capacity = logical_size after close
-    seg2.expand_to(2048_i64)
-    seg2.has_capacity_for?(100).should be_true   # now we can append again
-    seg2.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("b")))
-    seg2.count.should eq 2_u32
-
-    seg2.close
-    FileUtils.rm_rf(dir)
-  end
-
   it "byte_range_for returns disjoint ranges covering each entry" do
     dir = File.tempname("seg_byte_range")
     Dir.mkdir_p(dir)
-    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64, capacity: 4096_i64)
+    seg = Raft::Log::Segment(TestData).new(dir, first_index: 1_u64)
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 1_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("aaa")))
     seg.append(Raft::LogEntry(TestData).new(term: 1_u64, index: 2_u64, entry_type: Raft::EntryType::Normal, data: TestData.new("bb")))
 

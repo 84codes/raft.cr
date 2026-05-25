@@ -6,7 +6,24 @@ module Raft
     getter data : T?
     getter config_data : Bytes
 
+    # term (u64) + index (u64) + entry_type (u8) + data_size_prefix (u32)
+    HEADER_BYTESIZE = sizeof(UInt64) + sizeof(UInt64) + sizeof(UInt8) + sizeof(UInt32)
+
     def initialize(@term : UInt64, @index : UInt64, @entry_type : EntryType, @data : T? = nil, @config_data : Bytes = Bytes.new(0))
+    end
+
+    # Number of bytes this entry occupies when serialized via `to_io`.
+    # Requires T#bytesize to match what T#to_io writes.
+    def bytesize : Int32
+      payload =
+        if @entry_type == EntryType::Configuration && @config_data.size > 0
+          @config_data.size
+        elsif d = @data
+          d.bytesize
+        else
+          0
+        end
+      HEADER_BYTESIZE + payload
     end
 
     def to_io(io : IO, format : IO::ByteFormat = IO::ByteFormat::LittleEndian)
@@ -19,10 +36,8 @@ module Raft
         io.write_bytes(@config_data.size.to_u32, format)
         io.write(@config_data)
       elsif d = @data
-        data_io = IO::Memory.new
-        d.to_io(data_io, format)
-        io.write_bytes(data_io.pos.to_u32, format)
-        io.write(data_io.to_slice)
+        io.write_bytes(d.bytesize.to_u32, format)
+        d.to_io(io, format)
       else
         io.write_bytes(0_u32, format)
       end
