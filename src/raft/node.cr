@@ -40,6 +40,7 @@ module Raft
     @snapshot_send_offset : Hash(NodeID, UInt64) = {} of NodeID => UInt64
     @on_configuration_change : Proc(Array(Peer), Nil)?
     @on_configuration_applied : Proc(Array(Peer), Nil)?
+    @on_role_change : Proc(Role, Role, Nil)?
     @pending_config_index : UInt64 = 0_u64
     @pending_reads : Array(PendingRead) = [] of PendingRead
     @pending_apply : Array(PendingRead) = [] of PendingRead
@@ -328,6 +329,21 @@ module Raft
       @on_configuration_applied = block
     end
 
+    # Called on every role transition (Follower → Candidate, Candidate → Leader,
+    # Leader → Follower, etc.). Block receives (old_role, new_role).
+    #
+    # The block runs on the Raft fiber — keep it non-blocking. For work that
+    # needs to be done off the Raft fiber (e.g., AMQP listener startup on
+    # becoming leader), set a flag or signal a channel from the block and let
+    # another fiber do the heavy lifting.
+    #
+    # Fires on every transition, including intermediate ones (Follower →
+    # Candidate without then becoming Leader). Filter on `new_role` if you
+    # only care about specific transitions.
+    def on_role_change(&block : Role, Role ->)
+      @on_role_change = block
+    end
+
     def close
       @inbox.close
       @log.close
@@ -397,6 +413,7 @@ module Raft
         )}
       end
       cancel_pending_reads
+      @on_role_change.try(&.call(old_role, @role))
     end
 
     private def become_follower(leader : NodeID? = nil)
@@ -409,6 +426,7 @@ module Raft
       persist_state
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "follower"}))
       cancel_pending_reads
+      @on_role_change.try(&.call(old_role, @role)) if old_role != Role::Follower
     end
 
     private def cancel_pending_reads
@@ -419,6 +437,7 @@ module Raft
     end
 
     private def become_leader
+      old_role = @role
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => "candidate", "to" => "leader"}))
       @role = Role::Leader
       @leader_id = @id
@@ -432,6 +451,7 @@ module Raft
       @log.sync
       advance_commit_index
       send_append_entries
+      @on_role_change.try(&.call(old_role, @role))
     end
 
     private def handle_append_entries(msg : Message)

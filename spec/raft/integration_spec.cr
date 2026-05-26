@@ -272,6 +272,53 @@ describe "Integration: 3-node Raft cluster" do
     nodes.each_value(&.close)
   end
 
+  it "on_role_change fires on every transition with (old_role, new_role)" do
+    nodes, sms = make_cluster
+
+    transitions_1 = [] of {Raft::Role, Raft::Role}
+    transitions_2 = [] of {Raft::Role, Raft::Role}
+    nodes[1_u64].on_role_change { |old, new_role| transitions_1 << {old, new_role} }
+    nodes[2_u64].on_role_change { |old, new_role| transitions_2 << {old, new_role} }
+
+    # Drive an election — node 1 should win and become leader.
+    5.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    nodes[1_u64].role.should eq Raft::Role::Leader
+
+    # Node 1 went Follower → Candidate → Leader.
+    transitions_1.should eq [
+      {Raft::Role::Follower, Raft::Role::Candidate},
+      {Raft::Role::Candidate, Raft::Role::Leader},
+    ]
+    # Node 2 stayed Follower; no callback fired (suppressed by the
+    # old_role != Follower guard in become_follower).
+    transitions_2.should be_empty
+
+    # Force node 1 to step down via a higher-term AE.
+    nodes[1_u64].step(Raft::Message.new(
+      type: Raft::MessageType::AppendEntries,
+      from: 2_u64,
+      term: nodes[1_u64].current_term + 5_u64,
+      prev_log_index: 0_u64,
+      prev_log_term: 0_u64,
+      commit_index: 0_u64,
+    ))
+    transitions_1.last.should eq({Raft::Role::Leader, Raft::Role::Follower})
+
+    nodes.each_value(&.close)
+  end
+
+  it "on_role_change is optional — node works fine without one registered" do
+    nodes, sms = make_cluster
+
+    # No callback registered. Drive an election; nothing should crash.
+    5.times { nodes[1_u64].tick }
+    deliver_all(nodes)
+    nodes[1_u64].role.should eq Raft::Role::Leader
+
+    nodes.each_value(&.close)
+  end
+
   it "committed data survives partition and re-election" do
     nodes, sms = make_cluster
 
