@@ -309,13 +309,14 @@ abstract class Transport
 end
 ```
 
-That is the entire abstract interface. In practice a concrete transport also needs:
+That is one method, but the full abstract interface also includes:
 
-- A way for `Node`s to register their inbox channels per `group_id` so the transport knows where to route inbound messages.
-- A way to register peer addresses.
-- A way to start and stop.
+- `outbox : Channel({NodeID, Message})` — the producer-facing channel that consumers push outbound messages onto.
+- `register_channel(group_id, channel)` — for `Node`s to register their inbox channel so the transport knows where to route inbound messages.
+- `register_peer(id, host, port)` — for the application to tell the transport about a peer's address.
+- `start` / `stop` — lifecycle hooks.
 
-These are exposed as concrete methods on `TCPTransport` (`register_channel`, `register_peer`, `start`, `stop`) but are not part of the abstract base, since alternate transports may handle them differently.
+These are all abstract on `Raft::Transport`, so every implementation must provide them and consumers can rely on the same API without branching on transport type.
 
 ### `Raft::TCPTransport`
 
@@ -359,7 +360,9 @@ Peer addresses are persisted to a `transport_peers` file in the data directory a
 
 ### `Raft::MemoryTransport`
 
-An in-process transport used by the test suite. Lets multiple `Node`s share a hash of channels with no networking. Useful as a reference for the minimum implementation surface a custom transport needs.
+An in-process transport used by the test suite. Per-node like `TCPTransport`, but peer connections are paired `IO.pipe` file descriptors instead of TCP sockets. The wire format is identical (`Message#to_io` / `Message.from_io`), so specs exercise the same encode/decode, outbox, dispatcher, and per-peer fiber paths that run in production — only the underlying file descriptor changes.
+
+Test helpers `MemoryTransport.pipe_pair(a_id, b_id)` and `MemoryTransport.mesh(node_ids)` build the pipe wiring. An `isolated` property simulates partitions by dropping outbound writes and inbound reads at the transport boundary.
 
 ### How the I/O layer is linked
 
@@ -370,14 +373,18 @@ classDiagram
 
     class Transport {
         <<abstract>>
+        +outbox: Channel
         +send(to, msg)
-    }
-    class TCPTransport {
         +register_channel(group_id, ch)
         +register_peer(id, host, port)
         +start()
+        +stop()
     }
-    class MemoryTransport
+    class TCPTransport
+    class MemoryTransport {
+        +connect_to(peer_id, read, write)
+        +isolated: Bool
+    }
 
     Log "1" *-- "*" Segment
     Transport <|-- TCPTransport
@@ -683,13 +690,12 @@ Subclass `Raft::StateMachine(T)` and implement `apply`, `snapshot`, and `restore
 
 ### Custom transport
 
-Subclass `Raft::Transport` and implement `send(to:, message:)`. You will also need:
+Subclass `Raft::Transport` and implement the full abstract surface: `outbox`, `send`, `register_channel`, `register_peer`, `start`, `stop`. You will also need:
 
-- A way for nodes to register their inbox channels (your transport's responsibility — see how `TCPTransport#register_channel` does it via a command channel for safe concurrent registration).
 - A way to deliver inbound messages to the right inbox channel (route by `message.group_id`).
 - Persistence of peer addresses if you want them to survive restarts (or rely on the application to re-register on startup).
 
-The simplest reference is `MemoryTransport` (`src/raft/transport/memory_transport.cr`), which is a few dozen lines.
+The simplest reference is `MemoryTransport` (`src/raft/transport/memory_transport.cr`) — pipes for transport, but mirroring `TCPTransport`'s outbox / per-peer fiber structure.
 
 ### Driving without `Raft::Server`
 
