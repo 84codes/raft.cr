@@ -1172,6 +1172,17 @@ describe Raft::Node do
       node.close
     end
 
+    it "bootstrap fires on_role_change(Follower, Leader)" do
+      node = create_test_node(1_u64, [] of UInt64)
+      transitions = Array({Raft::Role, Raft::Role}).new
+      node.on_role_change { |old_role, new_role| transitions << {old_role, new_role} }
+
+      node.bootstrap.should eq true
+      transitions.should eq [{Raft::Role::Follower, Raft::Role::Leader}]
+
+      node.close
+    end
+
     it "bootstrap node can then add servers" do
       config = Raft::Config.new
       config.election_timeout_min_ticks = 5_u32

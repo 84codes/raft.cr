@@ -257,6 +257,7 @@ module Raft
       @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
       @commit_index = @log.last_index  # single-node cluster, immediately committed
       persist_state
+      @on_role_change.try(&.call(Role::Follower, @role))
       true
     end
 
