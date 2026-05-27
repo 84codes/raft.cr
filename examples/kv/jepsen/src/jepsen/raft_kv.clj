@@ -184,7 +184,7 @@
                         :linear   (independent/checker
                                     (checker/linearizable
                                       {:model     (model/register nil)
-                                       :algorithm :linear}))})
+                                       :algorithm :competition}))})
           :generator (->> (independent/concurrent-generator
                             5       ; threads per key
                             (range) ; infinite key sequence
