@@ -1,20 +1,34 @@
 require "socket"
+require "sync/exclusive"
+require "sync/shared"
 
 module Raft
   class TCPTransport < Transport
     @listen_address : String
     @listen_port : Int32
-    @peers : Hash(NodeID, {String, Int32}) = {} of NodeID => {String, Int32}
-    @connections : Hash(NodeID, TCPSocket) = {} of NodeID => TCPSocket
-    @channels : Hash(UInt64, Channel(Message)) = {} of UInt64 => Channel(Message)
-    @peer_outboxes : Hash(NodeID, Channel(Message)) = {} of NodeID => Channel(Message)
+    @peers : Sync::Shared(Hash(NodeID, {String, Int32})) = Sync::Shared(Hash(NodeID, {String, Int32})).new(
+      Hash(NodeID, {String, Int32}).new
+    )
+    @connections : Sync::Exclusive(Hash(NodeID, TCPSocket)) = Sync::Exclusive(Hash(NodeID, TCPSocket)).new(
+      Hash(NodeID, TCPSocket).new
+    )
+    @channels : Sync::Shared(Hash(UInt64, Channel(Message))) = Sync::Shared(Hash(UInt64, Channel(Message))).new(
+      Hash(UInt64, Channel(Message)).new
+    )
+    @peer_outboxes : Sync::Exclusive(Hash(NodeID, Channel(Message))) = Sync::Exclusive(Hash(NodeID, Channel(Message))).new(
+      Hash(NodeID, Channel(Message)).new
+    )
     @server : TCPServer? = nil
     @running : Bool = false
     @data_dir : String?
     getter outbox : Channel({NodeID, Message}) = Channel({NodeID, Message}).new(256)
     @commands : Channel(TransportCommand) = Channel(TransportCommand).new(64)
-    @outbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
-    @inbox_drops : Hash(NodeID, Int64) = Hash(NodeID, Int64).new(0_i64)
+    @outbox_drops : Sync::Exclusive(Hash(NodeID, Int64)) = Sync::Exclusive(Hash(NodeID, Int64)).new(
+      Hash(NodeID, Int64).new(0_i64)
+    )
+    @inbox_drops : Sync::Exclusive(Hash(NodeID, Int64)) = Sync::Exclusive(Hash(NodeID, Int64)).new(
+      Hash(NodeID, Int64).new(0_i64)
+    )
     @max_payload : UInt32
 
     private abstract struct TransportCommand
@@ -52,11 +66,10 @@ module Raft
       @commands.send(RegisterPeerCommand.new(id, host, port))
     end
 
-    # Look up a registered peer's host:port. Reads the registry directly;
-    # mutations happen on the dispatcher fiber and the registry is mostly
-    # stable after bootstrap, so unsynchronized reads are acceptable here.
+    # Look up a registered peer's host:port under the shared lock.
+    # Mutations happen on the dispatcher fiber via the commands channel.
     def peer_address?(id : NodeID) : {String, Int32}?
-      @peers[id]?
+      @peers.shared(&.[id]?)
     end
 
     def register_channel(group_id : UInt64, channel : Channel(Message))
@@ -90,20 +103,21 @@ module Raft
       @server.try(&.close)
       @commands.close
       @outbox.close
-      @peer_outboxes.each_value do |ch|
-        ch.close
+      @peer_outboxes.lock do |h|
+        h.each_value(&.close)
+        h.clear
       end
-      @peer_outboxes.clear
-      @connections.each_value do |conn|
-        conn.close rescue nil
+      @connections.lock do |h|
+        h.each_value { |conn| conn.close rescue nil }
+        h.clear
       end
-      @connections.clear
     end
 
     def send(to : NodeID, message : Message)
       conn = get_connection(to)
       unless conn
-        ::Log.warn { "Transport: no connection to node #{to} (peer known: #{@peers.has_key?(to)})" }
+        peer_known = @peers.shared(&.has_key?(to))
+        ::Log.warn { "Transport: no connection to node #{to} (peer known: #{peer_known})" }
         return
       end
       begin
@@ -111,7 +125,7 @@ module Raft
         conn.flush
       rescue ex : IO::Error
         ::Log.warn { "Transport: send to node #{to} failed: #{ex.message}" }
-        @connections.delete(to)
+        @connections.lock(&.delete(to))
         conn.close rescue nil
       end
     end
@@ -131,31 +145,35 @@ module Raft
     private def process_command(cmd : TransportCommand)
       case cmd
       when RegisterChannelCommand
-        @channels[cmd.group_id] = cmd.channel
+        @channels.lock { |h| h[cmd.group_id] = cmd.channel }
       when UnregisterChannelCommand
-        @channels.delete(cmd.group_id)
+        @channels.lock { |h| h.delete(cmd.group_id) }
       when RegisterPeerCommand
-        @peers[cmd.id] = {cmd.host, cmd.port}
+        @peers.lock { |h| h[cmd.id] = {cmd.host, cmd.port} }
         persist_peers
       end
     end
 
     private def route_to_peer(target_id : NodeID, msg : Message)
       ensure_peer_fiber(target_id)
-      if ch = @peer_outboxes[target_id]?
-        select
-        when ch.send(msg)
-        else
-          # Per-peer queue full, drop — Raft retries naturally
-          @outbox_drops[target_id] += 1
-        end
+      ch = @peer_outboxes.lock(&.[target_id]?)
+      return unless ch
+      select
+      when ch.send(msg)
+      else
+        # Per-peer queue full, drop — Raft retries naturally
+        @outbox_drops.lock { |h| h.update(target_id) { |v| v + 1 } }
       end
     end
 
     private def ensure_peer_fiber(peer_id : NodeID)
-      return if @peer_outboxes.has_key?(peer_id)
-      ch = Channel(Message).new(64)
-      @peer_outboxes[peer_id] = ch
+      ch = @peer_outboxes.lock do |h|
+        next nil if h.has_key?(peer_id)
+        new_ch = Channel(Message).new(64)
+        h[peer_id] = new_ch
+        new_ch
+      end
+      return unless ch
       spawn(name: "raft-transport-peer-#{peer_id}") do
         while @running
           msg = ch.receive
@@ -166,14 +184,15 @@ module Raft
     end
 
     private def get_connection(to : NodeID) : TCPSocket?
-      if conn = @connections[to]?
-        return conn unless conn.closed?
+      existing = @connections.lock(&.[to]?)
+      if existing
+        return existing unless existing.closed?
       end
-      if peer = @peers[to]?
+      if peer = @peers.shared(&.[to]?)
         begin
           conn = TCPSocket.new(peer[0], peer[1])
           conn.tcp_nodelay = true
-          @connections[to] = conn
+          @connections.lock { |h| h[to] = conn }
           conn
         rescue ex : Socket::ConnectError
           nil
@@ -185,11 +204,12 @@ module Raft
       client.tcp_nodelay = true
       while @running
         msg = Message.from_io(client, @max_payload)
-        if ch = @channels[msg.group_id]?
+        ch = @channels.shared(&.[msg.group_id]?)
+        if ch
           select
           when ch.send(msg)
           else
-            @inbox_drops[msg.from] += 1
+            @inbox_drops.lock { |h| h.update(msg.from) { |v| v + 1 } }
             ::Log.warn { "Transport: inbox full for group #{msg.group_id}, dropping #{msg.type} from #{msg.from}" }
           end
         else
@@ -203,20 +223,25 @@ module Raft
     def to_prometheus(io : IO)
       io << "# HELP raft_transport_outbox_drops_total Messages dropped due to full per-peer outbox\n"
       io << "# TYPE raft_transport_outbox_drops_total counter\n"
-      @outbox_drops.each do |peer_id, count|
-        io << "raft_transport_outbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+      @outbox_drops.lock do |h|
+        h.each do |peer_id, count|
+          io << "raft_transport_outbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+        end
       end
       io << "# HELP raft_transport_inbox_drops_total Messages dropped due to full group inbox\n"
       io << "# TYPE raft_transport_inbox_drops_total counter\n"
-      @inbox_drops.each do |peer_id, count|
-        io << "raft_transport_inbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+      @inbox_drops.lock do |h|
+        h.each do |peer_id, count|
+          io << "raft_transport_inbox_drops_total{peer=\"" << peer_id << "\"} " << count << '\n'
+        end
       end
     end
 
     private def persist_peers
       if dir = @data_dir
+        snapshot = @peers.shared(&.dup)
         File.open(File.join(dir, "transport_peers"), "w") do |f|
-          @peers.each do |id, (host, port)|
+          snapshot.each do |id, (host, port)|
             f.puts "#{id} #{host} #{port}"
           end
         end
@@ -227,10 +252,12 @@ module Raft
       if dir = @data_dir
         path = File.join(dir, "transport_peers")
         return unless File.exists?(path)
-        File.each_line(path) do |line|
-          parts = line.strip.split(" ")
-          next if parts.size < 3
-          @peers[parts[0].to_u64] = {parts[1], parts[2].to_i}
+        @peers.lock do |h|
+          File.each_line(path) do |line|
+            parts = line.strip.split(" ")
+            next if parts.size < 3
+            h[parts[0].to_u64] = {parts[1], parts[2].to_i}
+          end
         end
       end
     end

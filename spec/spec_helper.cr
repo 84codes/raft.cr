@@ -2,6 +2,12 @@ require "spec"
 require "file_utils"
 require "../src/raft"
 
+# Resize the default execution context to surface real cross-fiber sharing
+# under MT. Specs that rely on single-threaded scheduling will fail here
+# rather than in production.
+count = Fiber::ExecutionContext.default_workers_count
+Fiber::ExecutionContext.default.resize(count)
+
 struct TestData
   getter value : String
 
