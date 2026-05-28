@@ -1,6 +1,10 @@
+require "sync/shared"
+
 module Raft
   class Server(T)
-    @nodes : Hash(UInt64, Node(T)) = {} of UInt64 => Node(T)
+    @nodes : Sync::Shared(Hash(UInt64, Node(T))) = Sync::Shared(Hash(UInt64, Node(T))).new(
+      Hash(UInt64, Node(T)).new
+    )
     @config : Config
 
     def initialize(@config : Config)
@@ -14,22 +18,30 @@ module Raft
       group_config.heartbeat_ticks = @config.heartbeat_ticks
       group_config.max_segment_size = @config.max_segment_size
       Dir.mkdir_p(group_config.data_dir)
-      @nodes[group_id] = Node(T).new(id: node_id, peers: peers, config: group_config, state_machine: state_machine, group_id: group_id)
+      node = Node(T).new(id: node_id, peers: peers, config: group_config, state_machine: state_machine, group_id: group_id)
+      @nodes.lock { |h| h[group_id] = node }
+    end
+
+    def remove_group(group_id : UInt64)
+      node = @nodes.lock(&.delete(group_id))
+      node.try(&.close)
     end
 
     def node(group_id : UInt64) : Node(T)
-      @nodes[group_id]
+      @nodes.shared(&.[group_id])
     end
 
     def tick
-      @nodes.each_value(&.tick)
+      @nodes.shared { |h| h.each_value(&.tick) }
     end
 
     def take_all_messages : Array({NodeID, Message})
-      all = [] of {NodeID, Message}
-      @nodes.each_value do |node|
-        node.take_messages.each do |target_id, msg|
-          all << {target_id, msg}
+      all = Array({NodeID, Message}).new
+      @nodes.shared do |h|
+        h.each_value do |node|
+          node.take_messages.each do |target_id, msg|
+            all << {target_id, msg}
+          end
         end
       end
       all
@@ -45,7 +57,7 @@ module Raft
     end
 
     def close
-      @nodes.each_value(&.close)
+      @nodes.shared { |h| h.each_value(&.close) }
     end
   end
 end

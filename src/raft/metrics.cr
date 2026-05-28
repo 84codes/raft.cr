@@ -1,13 +1,20 @@
+require "sync/exclusive"
+
 module Raft
   class Metrics
     HISTOGRAM_BUCKETS = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
 
     @node_id : NodeID
     @group_id : UInt64
-    @gauges : Hash(String, Int64) = {} of String => Int64
-    @counters : Hash(String, Int64) = {} of String => Int64
-    @histograms : Hash(String, HistogramData) = {} of String => HistogramData
-    @mutex : Mutex = Mutex.new
+    @gauges : Sync::Exclusive(Hash(String, Int64)) = Sync::Exclusive(Hash(String, Int64)).new(
+      Hash(String, Int64).new(0_i64)
+    )
+    @counters : Sync::Exclusive(Hash(String, Int64)) = Sync::Exclusive(Hash(String, Int64)).new(
+      Hash(String, Int64).new(0_i64)
+    )
+    @histograms : Sync::Exclusive(Hash(String, HistogramData)) = Sync::Exclusive(Hash(String, HistogramData)).new(
+      {} of String => HistogramData
+    )
 
     struct HistogramData
       property buckets : Array(Int64)
@@ -26,37 +33,39 @@ module Raft
     end
 
     def set_gauge(name : String, value : Int64)
-      @gauges[name] = value
+      @gauges.lock { |g| g[name] = value }
     end
 
     def get_gauge(name : String) : Int64
-      @gauges.fetch(name, 0_i64)
+      @gauges.lock { |g| g[name] }
     end
 
     def increment(name : String, by : Int64 = 1_i64)
-      @counters[name] = @counters.fetch(name, 0_i64) + by
+      @counters.lock { |c| c.update(name) { |v| v + by } }
     end
 
     def increment(name : String, labels : Hash(String, String), by : Int64 = 1_i64)
-      key = "#{name}{#{labels.map { |k, v| "#{k}=\"#{v}\"" }.join(",")}}"
-      @counters[key] = @counters.fetch(key, 0_i64) + by
+      @counters.lock do |c|
+        key = "#{name}{#{labels.map { |k, v| "#{k}=\"#{v}\"" }.join(",")}}"
+        c.update(key) { |v| v + by }
+      end
     end
 
     def get_counter(name : String) : Int64
-      @counters.fetch(name, 0_i64)
+      @counters.lock { |c| c[name] }
     end
 
     def observe(name : String, value : Float64, labels : Hash(String, String) = {} of String => String)
-      @mutex.synchronize do
+      @histograms.lock do |histograms|
         key = labels.empty? ? name : "#{name}{#{labels.map { |k, v| "#{k}=\"#{v}\"" }.join(",")}}"
-        hist = @histograms[key]? || HistogramData.new(labels)
+        hist = histograms[key]? || HistogramData.new(labels)
         hist.sum += value
         hist.count += 1
         HISTOGRAM_BUCKETS.each_with_index do |bound, i|
           hist.buckets[i] += 1 if value <= bound
         end
         hist.buckets[HISTOGRAM_BUCKETS.size] += 1 # +Inf always
-        @histograms[key] = hist
+        histograms[key] = hist
       end
     end
 
@@ -64,13 +73,19 @@ module Raft
       String.build { |io| to_prometheus(io) }
     end
 
+    # Locks each metric hash separately. A scrape is not an atomic snapshot
+    # across types — gauges, counters, and histograms can advance between
+    # the three locks. Acceptable for Prometheus, which treats each line
+    # independently.
     def to_prometheus(io : IO) : Nil
-      @mutex.synchronize do
-        base_labels = "node_id=\"#{@node_id}\",group_id=\"#{@group_id}\""
-        @gauges.each do |name, value|
+      base_labels = "node_id=\"#{@node_id}\",group_id=\"#{@group_id}\""
+      @gauges.lock do |gauges|
+        gauges.each do |name, value|
           io << name << "{" << base_labels << "} " << value << "\n"
         end
-        @counters.each do |key, value|
+      end
+      @counters.lock do |counters|
+        counters.each do |key, value|
           if key.includes?('{')
             name = key.split('{').first
             extra_labels = key.split('{').last.rstrip('}')
@@ -79,7 +94,9 @@ module Raft
             io << key << "{" << base_labels << "} " << value << "\n"
           end
         end
-        @histograms.each do |key, hist|
+      end
+      @histograms.lock do |histograms|
+        histograms.each do |key, hist|
           base_name = key.includes?('{') ? key.split('{').first : key
           label_str = String.build do |ls|
             ls << base_labels
