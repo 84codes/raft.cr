@@ -114,19 +114,26 @@ module Raft
     end
 
     def send(to : NodeID, message : Message)
+      try_send(to, message)
+      nil
+    end
+
+    # Returns true if the message was written to a socket, false if no
+    # connection was available or the write failed. Used by the per-peer
+    # writer fiber to detect healthy↔unhealthy transitions and log once
+    # per transition rather than once per heartbeat.
+    private def try_send(to : NodeID, message : Message) : Bool
       conn = get_connection(to)
-      unless conn
-        peer_known = @peers.shared(&.has_key?(to))
-        ::Log.warn { "Transport: no connection to node #{to} (peer known: #{peer_known})" }
-        return
-      end
+      return false unless conn
       begin
         message.to_io(conn)
         conn.flush
+        true
       rescue ex : IO::Error
         ::Log.warn { "Transport: send to node #{to} failed: #{ex.message}" }
         @connections.lock(&.delete(to))
         conn.close rescue nil
+        false
       end
     end
 
@@ -175,9 +182,25 @@ module Raft
       end
       return unless ch
       spawn(name: "raft-transport-peer-#{peer_id}") do
+        # Local connectivity state — only this fiber sends to this peer, so
+        # no synchronization needed. Bootstrap-rate retries (peer address
+        # not yet registered) stay at DEBUG; once we know the address,
+        # transitions healthy↔unhealthy each log exactly once.
+        healthy = true
         while @running
           msg = ch.receive
-          send(to: peer_id, message: msg)
+          ok = try_send(to: peer_id, message: msg)
+          if ok && !healthy
+            ::Log.info { "Transport: connection to node #{peer_id} restored" }
+            healthy = true
+          elsif !ok && healthy
+            if @peers.shared(&.has_key?(peer_id))
+              ::Log.warn { "Transport: lost connection to node #{peer_id}" }
+            else
+              ::Log.debug { "Transport: no address registered for node #{peer_id} yet" }
+            end
+            healthy = false
+          end
         end
       rescue Channel::ClosedError
       end
