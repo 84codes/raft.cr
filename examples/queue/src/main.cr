@@ -42,11 +42,6 @@ start_group_loop = ->(node : Raft::Node(QueueCommand)) {
 }
 
 create_node = ->(group_id : UInt64, sm : Raft::StateMachine(QueueCommand)) {
-  current_peer_ids = if group_id > 0_u64 && !meta_node_holder.empty?
-                       meta_node_holder[0].peers.map(&.id).reject { |id| id == node_id }
-                     else
-                       [] of UInt64
-                     end
   cfg = Raft::Config.new
   cfg.data_dir = File.join(base_data_dir, "group-#{group_id}")
   cfg.election_timeout_min_ticks = 10_u32
@@ -59,8 +54,13 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(QueueCommand)) {
   cfg.snapshot_interval_entries = 100_u64
   Dir.mkdir_p(cfg.data_dir)
   metrics = Raft::Metrics.new(node_id: node_id, group_id: group_id)
+  # Data groups always start with an empty peer set. On the meta leader
+  # we bootstrap below; followers receive their peer list via Configuration
+  # entries replicated from the data leader. This avoids the bug where
+  # snapshotting meta.peers at apply-time would freeze a stale view if
+  # CreateQueue applied before all add_servers completed on meta.
   node = Raft::Node(QueueCommand).new(
-    id: node_id, peers: current_peer_ids, config: cfg,
+    id: node_id, peers: [] of UInt64, config: cfg,
     state_machine: sm, metrics: metrics, group_id: group_id,
     address: raft_advertise_address
   )
@@ -75,6 +75,18 @@ create_node = ->(group_id : UInt64, sm : Raft::StateMachine(QueueCommand)) {
   end
   transport.register_channel(group_id, node.inbox)
   start_group_loop.call(node)
+
+  # Bootstrap data groups from the meta leader. Followers learn membership
+  # via replication once this leader starts sending AppendEntries.
+  if group_id > 0_u64 && !meta_node_holder.empty? && meta_node_holder[0].role == Raft::Role::Leader
+    node.bootstrap
+    meta_node_holder[0].peers.each do |p|
+      next if p.id == node_id
+      node.add_server(p.id, p.address)
+      node.promote_learner(p.id)
+    end
+  end
+
   Log.info { "Created Raft group #{group_id}" }
   node
 }
@@ -104,8 +116,12 @@ meta_node.on_configuration_change do |new_peers|
     next unless data_node.role == Raft::Role::Leader
     new_peers.each do |p|
       next if p.id == node_id
-      unless data_node.peers.any? { |dp| dp.id == p.id }
-        data_node.add_server(p.id)
+      existing = data_node.peers.find { |dp| dp.id == p.id }
+      if existing.nil?
+        data_node.add_server(p.id, p.address)
+        data_node.promote_learner(p.id)
+      elsif existing.learner?
+        data_node.promote_learner(p.id)
       end
     end
     to_remove = data_node.peers.select do |dp|
