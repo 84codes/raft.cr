@@ -91,6 +91,8 @@ module Raft
           metrics.set_gauge("raft_node_snapshot_index", @node.snapshot_index.to_i64)
           metrics.set_gauge("raft_node_snapshot_size_bytes", @node.snapshot_size_bytes)
           metrics.set_gauge("raft_node_peers", @node.peers.size.to_i64)
+          metrics.set_gauge("raft_node_is_leader", @node.role.leader? ? 1_i64 : 0_i64)
+          metrics.set_gauge("raft_node_leader_id", (@node.leader_id || 0_u64).to_i64)
 
           context.response.content_type = "text/plain; version=0.0.4"
           context.response.status_code = 200
