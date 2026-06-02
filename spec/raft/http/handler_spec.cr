@@ -50,6 +50,9 @@ describe Raft::HTTP::Handler do
     response = ::HTTP::Client.get("http://127.0.0.1:#{address.port}/raft/metrics")
     response.status_code.should eq 200
     response.body.should contain("raft_node_term")
+    # Fresh follower with no leader yet: is_leader=0, leader_id=0 (nil → 0).
+    response.body.should match /raft_node_is_leader\{[^}]*\} 0\n/
+    response.body.should match /raft_node_leader_id\{[^}]*\} 0\n/
 
     server.close
     node.close
