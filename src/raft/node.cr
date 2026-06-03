@@ -379,6 +379,15 @@ module Raft
       @pre_votes_received.add(@id) # vote for self
       @metrics.try(&.increment("raft_prevote_campaigns_total"))
 
+      # Lone-voter shortcut: self alone is quorum. Without this, the loop
+      # below sends zero messages, no response handler ever fires, and the
+      # node sits in Follower forever (only matters at restart — bootstrap
+      # sets Leader directly).
+      if @pre_votes_received.size >= quorum_size
+        become_candidate
+        return
+      end
+
       other_voters.each do |peer|
         @outbox << {peer.id, Message.new(
           type: MessageType::PreVote,
@@ -403,6 +412,15 @@ module Raft
       @metrics.try(&.increment("raft_elections_total"))
       @metrics.try(&.increment("raft_term_changes_total", {"reason" => "election"}))
       @metrics.try(&.increment("raft_state_transitions_total", {"from" => old_role.to_s.downcase, "to" => "candidate"}))
+
+      # Lone-voter shortcut after term+vote are persisted: self alone is
+      # quorum, so promote immediately. Skips sending RequestVotes to phantom
+      # peers and avoids waiting for response handlers that will never fire.
+      if @votes_received.size >= quorum_size
+        @on_role_change.try(&.call(old_role, @role))
+        become_leader
+        return
+      end
 
       other_voters.each do |peer|
         @outbox << {peer.id, Message.new(
