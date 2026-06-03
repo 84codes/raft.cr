@@ -1215,6 +1215,38 @@ describe Raft::Node do
       node.close
     end
 
+    it "single-voter cluster transitions to leader after restart" do
+      # Regression for the lone-voter restart bug: after bootstrap + restart
+      # the node loads @peers=[self] from disk but starts in Follower, and
+      # without an external response message there was no path for the
+      # quorum check to fire — start_pre_vote / become_candidate iterated
+      # other_voters (empty) and the election stalled forever.
+      dir = File.tempname("raft_single_voter_restart")
+      Dir.mkdir_p(dir)
+      cfg = Raft::Config.new
+      cfg.data_dir = dir
+      cfg.election_timeout_min_ticks = 1_u32
+      cfg.election_timeout_max_ticks = 2_u32
+
+      sm1 = TestStateMachine.new
+      node1 = Raft::Node(TestData).new(id: 1_u64, peers: [] of Raft::NodeID, config: cfg, state_machine: sm1)
+      node1.bootstrap.should be_true
+      node1.role.should eq Raft::Role::Leader
+      node1.close
+
+      sm2 = TestStateMachine.new
+      node2 = Raft::Node(TestData).new(id: 1_u64, peers: [] of Raft::NodeID, config: cfg, state_machine: sm2)
+      node2.role.should eq Raft::Role::Follower
+      node2.peers.size.should eq 1
+      node2.voters.size.should eq 1
+
+      50.times { node2.tick }
+      node2.role.should eq Raft::Role::Leader
+
+      node2.close
+      FileUtils.rm_rf(dir)
+    end
+
     it "rejects concurrent configuration changes" do
       config = Raft::Config.new
       config.election_timeout_min_ticks = 5_u32
