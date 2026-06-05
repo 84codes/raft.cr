@@ -217,7 +217,13 @@ module Raft
           conn.tcp_nodelay = true
           @connections.lock { |h| h[to] = conn }
           conn
-        rescue ex : Socket::ConnectError
+        rescue ex : Socket::Error
+          # Catches both Socket::ConnectError (peer port closed) AND
+          # Socket::Addrinfo::Error (DNS lookup failure, e.g. when a
+          # peer container is stopped). Previously only ConnectError was
+          # caught, so a DNS failure during a peer outage killed the
+          # per-peer writer fiber and the leader couldn't reconnect when
+          # the peer came back.
           nil
         end
       end
