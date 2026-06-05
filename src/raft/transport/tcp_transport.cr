@@ -59,6 +59,13 @@ module Raft
     end
 
     def initialize(@listen_address : String, @listen_port : Int32, @data_dir : String? = nil, @max_payload : UInt32 = 64_u32 * 1024_u32 * 1024_u32)
+      # Ensure the directory exists before any persist_peers call. Without
+      # this, the dispatch fiber crashes with File::NotFoundError on the
+      # first register_peer if the embedder didn't pre-create the path.
+      # nil data_dir means "don't persist" and stays untouched.
+      if dir = @data_dir
+        Dir.mkdir_p(dir)
+      end
       recover_peers
     end
 

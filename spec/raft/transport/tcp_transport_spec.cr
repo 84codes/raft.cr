@@ -103,4 +103,40 @@ describe Raft::TCPTransport do
     sleep 10.milliseconds
     t.stop
   end
+
+  it "skips persistence when data_dir is nil" do
+    # nil data_dir means "don't persist" — register_peer must succeed
+    # without raising and without writing anything to disk.
+    t = Raft::TCPTransport.new(listen_address: "127.0.0.1", listen_port: 19749, data_dir: nil)
+    t.start
+
+    t.register_peer(2_u64, "127.0.0.1", 19999)
+    sleep 50.milliseconds # let the dispatcher process the command
+
+    t.stop
+  end
+
+  it "creates data_dir on construction so persist_peers doesn't crash" do
+    parent = File.tempname("raft_tcp_persist")
+    Dir.mkdir_p(parent)
+    leaf = File.join(parent, "missing-leaf")
+    File.exists?(leaf).should be_false
+
+    t = Raft::TCPTransport.new(listen_address: "127.0.0.1", listen_port: 19748, data_dir: leaf)
+    t.start
+
+    # register_peer routes through the dispatcher; persist_peers writes
+    # to disk. Without the mkdir_p this raised File::NotFoundError on
+    # the dispatch fiber.
+    t.register_peer(2_u64, "127.0.0.1", 19999)
+
+    deadline = Time.instant + 1.second
+    until File.exists?(File.join(leaf, "transport_peers")) || Time.instant > deadline
+      sleep 10.milliseconds
+    end
+    File.exists?(File.join(leaf, "transport_peers")).should be_true
+
+    t.stop
+    FileUtils.rm_rf(parent)
+  end
 end
