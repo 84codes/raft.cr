@@ -1,0 +1,49 @@
+name: CI
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'spec/**'
+      - 'shard.*'
+      - '.ameba.yml'
+      - '.github/workflows/ci.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'spec/**'
+      - 'shard.*'
+      - '.ameba.yml'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    container: 84codes/crystal:latest-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: crystal tool format --check
+
+  lint:
+    name: Lint check
+    runs-on: ubuntu-latest
+    container: 84codes/crystal:latest-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: shards install
+      - run: lib/ameba/bin/ameba --fail-level error src/ spec/
+
+  spec:
+    name: Spec
+    runs-on: ubuntu-latest
+    container: 84codes/crystal:latest-ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Print Crystal version
+        run: crystal -v
+      - uses: actions/checkout@v6
+      - name: Spec
+        run: crystal spec spec/raft/ -Dpreview_mt -Dexecution_context

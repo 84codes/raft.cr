@@ -1,0 +1,47 @@
+# Ameba configuration. The lint job enforces this.
+# Cosmetic-only rules are disabled globally; meaningful checks stay on at
+# Warning severity so they don't block CI but show up in PR review.
+
+# Cosmetic — short block parameter names (e.g. `|tid, m|`) are idiomatic
+# in the Raft message-routing code.
+Naming/BlockParameterName:
+  Enabled: false
+
+# Cosmetic — single-expression blocks vs `&.method` is a style preference.
+Style/VerboseBlock:
+  Enabled: false
+
+# Cosmetic — `voter` vs `voter?` is opinionated. The Peer struct uses the
+# `?` form for predicates; the few non-? boolean properties are deliberate.
+Naming/QueryBoolMethods:
+  Enabled: false
+
+# Real signal but advisory — `not_nil!` indicates places that could be
+# rewritten with safer narrowing. Currently 43 of these across the
+# codebase; chip away over time.
+Lint/NotNil:
+  Enabled: true
+  Severity: Warning
+
+Lint/NotNilAfterNoBang:
+  Enabled: true
+  Severity: Warning
+
+# Informational — `Node#step` and the TUI dashboard are intentionally
+# complex; refactoring is non-trivial. Track but don't fail CI.
+Metrics/CyclomaticComplexity:
+  Enabled: true
+  Severity: Warning
+
+# Performance suggestions — keep at Warning so they don't block CI.
+Performance/ChainedCallWithNoBang:
+  Enabled: true
+  Severity: Warning
+
+Performance/AnyInsteadOfEmpty:
+  Enabled: true
+  Severity: Warning
+
+Lint/UselessAssign:
+  Enabled: true
+  Severity: Warning
