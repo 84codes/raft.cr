@@ -30,8 +30,8 @@ module Raft
       end
 
       def run
-        print "\e[?25l"   # hide cursor
-        print "\e[2J"     # clear screen
+        print "\e[?25l" # hide cursor
+        print "\e[2J"   # clear screen
         STDIN.raw!
 
         spawn do
@@ -46,7 +46,7 @@ module Raft
           handle_input
         end
       ensure
-        print "\e[?25h"   # show cursor
+        print "\e[?25h" # show cursor
         STDIN.cooked!
         STDOUT.puts "\r\nGoodbye."
       end

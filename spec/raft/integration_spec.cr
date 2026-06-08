@@ -102,138 +102,138 @@ describe "Integration: 3-node Raft cluster" do
   end
 
   {% if flag?(:raft_debug) %}
-  it "partitioned node does not inflate term (pre-vote)" do
-    nodes, sms = make_cluster
+    it "partitioned node does not inflate term (pre-vote)" do
+      nodes, sms = make_cluster
 
-    # Elect node 1
-    5.times { nodes[1_u64].tick }
-    deliver_all(nodes)
-    nodes[1_u64].role.should eq Raft::Role::Leader
-    term_before = nodes[2_u64].current_term
+      # Elect node 1
+      5.times { nodes[1_u64].tick }
+      deliver_all(nodes)
+      nodes[1_u64].role.should eq Raft::Role::Leader
+      term_before = nodes[2_u64].current_term
 
-    # Partition node 2
-    nodes[2_u64].partition
+      # Partition node 2
+      nodes[2_u64].partition
 
-    # Tick node 2 through many election timeouts
-    50.times { nodes[2_u64].tick }
-    nodes[2_u64].take_messages # drain (all dropped)
+      # Tick node 2 through many election timeouts
+      50.times { nodes[2_u64].tick }
+      nodes[2_u64].take_messages # drain (all dropped)
 
-    # Term should NOT have changed
-    nodes[2_u64].current_term.should eq term_before
+      # Term should NOT have changed
+      nodes[2_u64].current_term.should eq term_before
 
-    # Heal and verify cluster converges
-    nodes[2_u64].heal
-    2.times { nodes[1_u64].tick } # heartbeat
-    deliver_all(nodes)
+      # Heal and verify cluster converges
+      nodes[2_u64].heal
+      2.times { nodes[1_u64].tick } # heartbeat
+      deliver_all(nodes)
 
-    nodes[2_u64].role.should eq Raft::Role::Follower
-    nodes[2_u64].current_term.should eq term_before
+      nodes[2_u64].role.should eq Raft::Role::Follower
+      nodes[2_u64].current_term.should eq term_before
 
-    nodes.each_value(&.close)
-  end
+      nodes.each_value(&.close)
+    end
 
-  it "uncommitted entries from old leader are overwritten after re-election" do
-    nodes, sms = make_cluster(heartbeat_ticks: 100_u32)
+    it "uncommitted entries from old leader are overwritten after re-election" do
+      nodes, sms = make_cluster(heartbeat_ticks: 100_u32)
 
-    # Elect node 1
-    5.times { nodes[1_u64].tick }
-    deliver_all(nodes)
-    nodes[1_u64].role.should eq Raft::Role::Leader
+      # Elect node 1
+      5.times { nodes[1_u64].tick }
+      deliver_all(nodes)
+      nodes[1_u64].role.should eq Raft::Role::Leader
 
-    # Propose and commit an entry on all nodes
-    nodes[1_u64].propose(TestData.new("committed"))
-    deliver_all(nodes)
-    100.times { nodes[1_u64].tick } # heartbeat to propagate commit
-    deliver_all(nodes)
+      # Propose and commit an entry on all nodes
+      nodes[1_u64].propose(TestData.new("committed"))
+      deliver_all(nodes)
+      100.times { nodes[1_u64].tick } # heartbeat to propagate commit
+      deliver_all(nodes)
 
-    sms.each_value { |sm| sm.applied.size.should eq 1 }
+      sms.each_value { |sm| sm.applied.size.should eq 1 }
 
-    # Partition node 1 (leader) from the cluster
-    nodes[1_u64].partition
+      # Partition node 1 (leader) from the cluster
+      nodes[1_u64].partition
 
-    # Leader proposes entries that won't reach anyone
-    nodes[1_u64].propose(TestData.new("uncommitted1"))
-    nodes[1_u64].propose(TestData.new("uncommitted2"))
-    nodes[1_u64].take_messages # drained by partition
+      # Leader proposes entries that won't reach anyone
+      nodes[1_u64].propose(TestData.new("uncommitted1"))
+      nodes[1_u64].propose(TestData.new("uncommitted2"))
+      nodes[1_u64].take_messages # drained by partition
 
-    # Node 1 has extra uncommitted entries
-    nodes[1_u64].log.last_index.should be > nodes[2_u64].log.last_index
+      # Node 1 has extra uncommitted entries
+      nodes[1_u64].log.last_index.should be > nodes[2_u64].log.last_index
 
-    # Elect node 2 as new leader
-    5.times { nodes[2_u64].tick }
-    deliver_all(nodes)
-    nodes[2_u64].role.should eq Raft::Role::Leader
+      # Elect node 2 as new leader
+      5.times { nodes[2_u64].tick }
+      deliver_all(nodes)
+      nodes[2_u64].role.should eq Raft::Role::Leader
 
-    # New leader proposes an entry
-    nodes[2_u64].propose(TestData.new("new_leader_entry"))
-    deliver_all(nodes)
-    100.times { nodes[2_u64].tick } # heartbeat to propagate commit
-    deliver_all(nodes)
+      # New leader proposes an entry
+      nodes[2_u64].propose(TestData.new("new_leader_entry"))
+      deliver_all(nodes)
+      100.times { nodes[2_u64].tick } # heartbeat to propagate commit
+      deliver_all(nodes)
 
-    # Node 3 should have the new entry (not the old leader's uncommitted ones)
-    sms[3_u64].applied.size.should eq 2
-    sms[3_u64].applied[1].value.should eq "new_leader_entry"
+      # Node 3 should have the new entry (not the old leader's uncommitted ones)
+      sms[3_u64].applied.size.should eq 2
+      sms[3_u64].applied[1].value.should eq "new_leader_entry"
 
-    # Heal node 1 — it should converge to node 2's log
-    nodes[1_u64].heal
-    100.times { nodes[2_u64].tick } # heartbeats
-    deliver_all(nodes)
+      # Heal node 1 — it should converge to node 2's log
+      nodes[1_u64].heal
+      100.times { nodes[2_u64].tick } # heartbeats
+      deliver_all(nodes)
 
-    # Node 1's uncommitted entries should be overwritten
-    sms[1_u64].applied.size.should eq 2
-    sms[1_u64].applied[1].value.should eq "new_leader_entry"
+      # Node 1's uncommitted entries should be overwritten
+      sms[1_u64].applied.size.should eq 2
+      sms[1_u64].applied[1].value.should eq "new_leader_entry"
 
-    nodes.each_value(&.close)
-  end
+      nodes.each_value(&.close)
+    end
 
-  it "paused leader triggers new election" do
-    nodes, sms = make_cluster
+    it "paused leader triggers new election" do
+      nodes, sms = make_cluster
 
-    # Elect node 1
-    5.times { nodes[1_u64].tick }
-    deliver_all(nodes)
-    nodes[1_u64].role.should eq Raft::Role::Leader
+      # Elect node 1
+      5.times { nodes[1_u64].tick }
+      deliver_all(nodes)
+      nodes[1_u64].role.should eq Raft::Role::Leader
 
-    # Commit an entry so we know cluster is working
-    nodes[1_u64].propose(TestData.new("before_pause"))
-    deliver_all(nodes)
-    2.times { nodes[1_u64].tick }
-    deliver_all(nodes)
-    sms.each_value { |sm| sm.applied.size.should eq 1 }
+      # Commit an entry so we know cluster is working
+      nodes[1_u64].propose(TestData.new("before_pause"))
+      deliver_all(nodes)
+      2.times { nodes[1_u64].tick }
+      deliver_all(nodes)
+      sms.each_value { |sm| sm.applied.size.should eq 1 }
 
-    # Pause the leader — it stops ticking (no heartbeats)
-    nodes[1_u64].pause
+      # Pause the leader — it stops ticking (no heartbeats)
+      nodes[1_u64].pause
 
-    # Tick followers past election timeout — they should start an election
-    # Only tick node 2 first to avoid split vote
-    5.times { nodes[2_u64].tick }
-    deliver_all(nodes)
+      # Tick followers past election timeout — they should start an election
+      # Only tick node 2 first to avoid split vote
+      5.times { nodes[2_u64].tick }
+      deliver_all(nodes)
 
-    # Node 2 should be the new leader
-    nodes[2_u64].role.should eq Raft::Role::Leader
-    nodes[2_u64].current_term.should be > 1_u64
+      # Node 2 should be the new leader
+      nodes[2_u64].role.should eq Raft::Role::Leader
+      nodes[2_u64].current_term.should be > 1_u64
 
-    # New leader can accept proposals
-    nodes[2_u64].propose(TestData.new("after_pause"))
-    deliver_all(nodes)
-    2.times { nodes[2_u64].tick }
-    deliver_all(nodes)
+      # New leader can accept proposals
+      nodes[2_u64].propose(TestData.new("after_pause"))
+      deliver_all(nodes)
+      2.times { nodes[2_u64].tick }
+      deliver_all(nodes)
 
-    # Node 3 should have the new entry (node 1 is paused, won't get it)
-    sms[3_u64].applied.size.should eq 2
-    sms[3_u64].applied[1].value.should eq "after_pause"
+      # Node 3 should have the new entry (node 1 is paused, won't get it)
+      sms[3_u64].applied.size.should eq 2
+      sms[3_u64].applied[1].value.should eq "after_pause"
 
-    # Resume node 1 — it should step down and catch up
-    nodes[1_u64].resume
-    2.times { nodes[2_u64].tick } # heartbeat from new leader
-    deliver_all(nodes)
+      # Resume node 1 — it should step down and catch up
+      nodes[1_u64].resume
+      2.times { nodes[2_u64].tick } # heartbeat from new leader
+      deliver_all(nodes)
 
-    nodes[1_u64].role.should eq Raft::Role::Follower
-    sms[1_u64].applied.size.should eq 2
-    sms[1_u64].applied[1].value.should eq "after_pause"
+      nodes[1_u64].role.should eq Raft::Role::Follower
+      sms[1_u64].applied.size.should eq 2
+      sms[1_u64].applied[1].value.should eq "after_pause"
 
-    nodes.each_value(&.close)
-  end
+      nodes.each_value(&.close)
+    end
   {% end %}
 
   it "transfers leadership to a specific follower" do

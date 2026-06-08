@@ -255,7 +255,7 @@ module Raft
       @leader_id = @id
       config_bytes = serialize_peers
       @log.append(term: @current_term, entry_type: EntryType::Configuration, config_data: config_bytes)
-      @commit_index = @log.last_index  # single-node cluster, immediately committed
+      @commit_index = @log.last_index # single-node cluster, immediately committed
       persist_state
       @on_role_change.try(&.call(Role::Follower, @role))
       true
@@ -371,7 +371,7 @@ module Raft
     end
 
     private def start_pre_vote
-      return if @peers.empty? # standalone node, no elections
+      return if @peers.empty?                                   # standalone node, no elections
       return unless @peers.any? { |p| p.id == @id && p.voter? } # learners don't elect
       @election_tick = 0_u32
       @election_timeout = random_election_timeout
@@ -614,7 +614,7 @@ module Raft
 
     private def record_read_index_ack(msg : Message)
       return if @pending_reads.empty?
-      return if msg.term < @current_term       # stale ack — protocol invariant
+      return if msg.term < @current_term # stale ack — protocol invariant
       voter_ids = voters.map(&.id).to_set
       return unless voter_ids.includes?(msg.from)
 

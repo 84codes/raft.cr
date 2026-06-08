@@ -485,10 +485,10 @@ class KVHttpHandler
     context.response.content_type = "application/json"
     context.response.status_code = 200
     result = {
-      "status"    => "rebalance_initiated",
-      "transfers" => transfers.size,
+      "status"       => "rebalance_initiated",
+      "transfers"    => transfers.size,
       "total_groups" => groups.size,
-      "details"   => transfers.map { |key, from, to| {"key" => key, "from" => from, "to" => to} },
+      "details"      => transfers.map { |key, from, to| {"key" => key, "from" => from, "to" => to} },
     }
     context.response.print result.to_json
   end

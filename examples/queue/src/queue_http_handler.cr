@@ -236,7 +236,7 @@ class QueueHttpHandler
   # @meta_node — calling them simulates "pause meta group", not "pause this
   # whole physical node". This wrapper makes the chaos buttons (pause, partition,
   # heal, reset) affect the entire node, which is what TUI demos assume.
-  private def apply_to_all_groups(context, action : String)
+  private def apply_to_all_groups(context, action : String, &)
     {% if flag?(:raft_debug) %}
       @nodes.each_value { |node| yield node }
       context.response.content_type = "application/json"
