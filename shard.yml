@@ -1,8 +1,12 @@
 name: raft
 version: 0.1.0
+description: A fast, embeddable Raft consensus library for Crystal — multi-raft, segmented log, pre-vote, learners, snapshots, linearizable reads.
 
 authors:
   - Anton Dalgren <anton@84codes.com>
+
+repository: https://github.com/84codes/raft.cr
+documentation: https://github.com/84codes/raft.cr/blob/main/ARCHITECTURE.md
 
 targets:
   raft-tui:
