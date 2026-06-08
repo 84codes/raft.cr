@@ -60,33 +60,33 @@ describe Raft::HTTP::Handler do
   end
 
   {% if flag?(:raft_debug) %}
-  it "pauses and resumes node via admin endpoints" do
-    dir = File.tempname("raft_http")
-    Dir.mkdir_p(dir)
-    config = Raft::Config.new
-    config.data_dir = dir
-    config.election_timeout_min_ticks = 100_u32
-    config.election_timeout_max_ticks = 100_u32
+    it "pauses and resumes node via admin endpoints" do
+      dir = File.tempname("raft_http")
+      Dir.mkdir_p(dir)
+      config = Raft::Config.new
+      config.data_dir = dir
+      config.election_timeout_min_ticks = 100_u32
+      config.election_timeout_max_ticks = 100_u32
 
-    sm = TestStateMachine.new
-    node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: config, state_machine: sm)
+      sm = TestStateMachine.new
+      node = Raft::Node(TestData).new(id: 1_u64, peers: [2_u64, 3_u64], config: config, state_machine: sm)
 
-    handler = Raft::HTTP::Handler(TestData).new(node)
-    server = ::HTTP::Server.new([handler])
-    address = server.bind_tcp("127.0.0.1", 0)
-    spawn server.listen
+      handler = Raft::HTTP::Handler(TestData).new(node)
+      server = ::HTTP::Server.new([handler])
+      address = server.bind_tcp("127.0.0.1", 0)
+      spawn server.listen
 
-    response = ::HTTP::Client.post("http://127.0.0.1:#{address.port}/raft/admin/pause")
-    response.status_code.should eq 200
-    node.paused.should be_true
+      response = ::HTTP::Client.post("http://127.0.0.1:#{address.port}/raft/admin/pause")
+      response.status_code.should eq 200
+      node.paused.should be_true
 
-    response = ::HTTP::Client.post("http://127.0.0.1:#{address.port}/raft/admin/resume")
-    response.status_code.should eq 200
-    node.paused.should be_false
+      response = ::HTTP::Client.post("http://127.0.0.1:#{address.port}/raft/admin/resume")
+      response.status_code.should eq 200
+      node.paused.should be_false
 
-    server.close
-    node.close
-    FileUtils.rm_rf(dir)
-  end
+      server.close
+      node.close
+      FileUtils.rm_rf(dir)
+    end
   {% end %}
 end

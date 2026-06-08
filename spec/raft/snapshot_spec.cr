@@ -118,10 +118,10 @@ describe "Raft::Node InstallSnapshot receive" do
     # Build a "leader" snapshot file manually using the same framing as persist_snapshot:
     # [u64 index][u64 term][u32 peer_len][peers][sm_bytes]
     fake_body = IO::Memory.new
-    fake_body.write_bytes(42_u64, IO::ByteFormat::LittleEndian)  # snapshot_index
-    fake_body.write_bytes(1_u64, IO::ByteFormat::LittleEndian)   # snapshot_term
-    fake_body.write_bytes(4_u32, IO::ByteFormat::LittleEndian)   # peer_len (just the u32 count below)
-    fake_body.write_bytes(0_u32, IO::ByteFormat::LittleEndian)   # 0 peers
+    fake_body.write_bytes(42_u64, IO::ByteFormat::LittleEndian) # snapshot_index
+    fake_body.write_bytes(1_u64, IO::ByteFormat::LittleEndian)  # snapshot_term
+    fake_body.write_bytes(4_u32, IO::ByteFormat::LittleEndian)  # peer_len (just the u32 count below)
+    fake_body.write_bytes(0_u32, IO::ByteFormat::LittleEndian)  # 0 peers
     sm_seed = TestStateMachine.new
     sm_seed.apply(TestData.new("x"))
     sm_seed.apply(TestData.new("y"))
@@ -137,11 +137,11 @@ describe "Raft::Node InstallSnapshot receive" do
       type: Raft::MessageType::InstallSnapshot,
       from: 1_u64,
       term: 1_u64,
-      prev_log_index: 42_u64,        # snapshot_index
-      prev_log_term: 1_u64,          # snapshot_term
-      last_log_index: 0_u64,         # chunk offset
+      prev_log_index: 42_u64,                # snapshot_index
+      prev_log_term: 1_u64,                  # snapshot_term
+      last_log_index: 0_u64,                 # chunk offset
       last_log_term: body_bytes.size.to_u64, # total size
-      success: true,                 # is_last_chunk
+      success: true,                         # is_last_chunk
       entries_data: body_bytes,
     )
     node.step(msg)
@@ -349,10 +349,10 @@ describe "Raft::Node post-snapshot AppendEntries (regression)" do
     # - buggy  path: reset sets last_index=0 → appended entries land at 1,2,3
     # - fixed  path: reset_to(30) sets last_index=30 → entries land at 31,32,33
     fake_body = IO::Memory.new
-    fake_body.write_bytes(30_u64, IO::ByteFormat::LittleEndian)  # snapshot_index
-    fake_body.write_bytes(1_u64, IO::ByteFormat::LittleEndian)   # snapshot_term
-    fake_body.write_bytes(4_u32, IO::ByteFormat::LittleEndian)   # peer_len (byte count below)
-    fake_body.write_bytes(0_u32, IO::ByteFormat::LittleEndian)   # 0 peers
+    fake_body.write_bytes(30_u64, IO::ByteFormat::LittleEndian) # snapshot_index
+    fake_body.write_bytes(1_u64, IO::ByteFormat::LittleEndian)  # snapshot_term
+    fake_body.write_bytes(4_u32, IO::ByteFormat::LittleEndian)  # peer_len (byte count below)
+    fake_body.write_bytes(0_u32, IO::ByteFormat::LittleEndian)  # 0 peers
     sm_seed = TestStateMachine.new
     5.times { |i| sm_seed.apply(TestData.new("s#{i}")) }
     sm_seed.snapshot(fake_body)
@@ -366,11 +366,11 @@ describe "Raft::Node post-snapshot AppendEntries (regression)" do
       type: Raft::MessageType::InstallSnapshot,
       from: 1_u64,
       term: 1_u64,
-      prev_log_index: 30_u64,        # snapshot_index
-      prev_log_term: 1_u64,          # snapshot_term
-      last_log_index: 0_u64,         # chunk offset
+      prev_log_index: 30_u64,                # snapshot_index
+      prev_log_term: 1_u64,                  # snapshot_term
+      last_log_index: 0_u64,                 # chunk offset
       last_log_term: body_bytes.size.to_u64, # total size
-      success: true,                 # is_last_chunk
+      success: true,                         # is_last_chunk
       entries_data: body_bytes,
     )
     node.step(install)

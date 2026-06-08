@@ -8,9 +8,9 @@ module Raft
   # paths that run in production. Per-node: each instance owns one outbox,
   # one dispatcher fiber, and a reader+writer fiber pair for each peer.
   class MemoryTransport < Transport
-    DEFAULT_OUTBOX_SIZE   =       256
-    DEFAULT_PEER_OUTBOX   =        64
-    DEFAULT_MAX_PAYLOAD   = 64_u32 * 1024_u32 * 1024_u32
+    DEFAULT_OUTBOX_SIZE = 256
+    DEFAULT_PEER_OUTBOX =  64
+    DEFAULT_MAX_PAYLOAD = 64_u32 * 1024_u32 * 1024_u32
 
     getter node_id : NodeID
     getter outbox : Channel({NodeID, Message})

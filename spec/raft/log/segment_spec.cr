@@ -207,7 +207,7 @@ describe Raft::Log::Segment do
     offset2, length2 = seg.byte_range_for(2_u64)
 
     offset1.should eq 0_u64
-    offset2.should eq (offset1 + length1)
+    offset2.should eq(offset1 + length1)
     length1.should be > 0_u32
     length2.should be > 0_u32
 
