@@ -5,7 +5,7 @@ This document describes how the Raft library is structured, how the pieces fit t
 It serves three audiences at once:
 
 - **New contributors** — what each file does, where to make changes, and what invariants to preserve.
-- **Library users / integrators** (e.g. embedding this in LavinMQ) — what the library guarantees, what it does not, and which extension points to use.
+- **Library users / integrators** (e.g. embedding this in a broker or other consensus-backed service) — what the library guarantees, what it does not, and which extension points to use.
 - **Future you** — the rationale behind the trade-offs, so you don't have to re-derive them.
 
 ## 1. Overview & goals
@@ -198,8 +198,10 @@ A small struct of tunables read at construction time:
 | `election_timeout_max_ticks` | 20 | Election timeout upper bound (1000ms) |
 | `max_segment_size` | 64 MB | Log segment rollover threshold |
 | `max_append_entries_size` | 1 MB | Cap on `entries_data` per AppendEntries message |
+| `max_message_payload_bytes` | 64 MB | Per-message payload cap on the wire (transport `from_io` rejects larger frames) |
 | `snapshot_chunk_size` | 1 MB | Chunk size for InstallSnapshot RPC payloads |
 | `snapshot_interval_entries` | 1000 | Trigger snapshot after this many committed entries |
+| `read_index_timeout_ticks` | 100 | ReadIndex callback fires with `nil` if leadership confirmation doesn't arrive within this many ticks (5s at default tick) |
 | `data_dir` | `"data"` | Where logs and metadata live |
 
 `Config` is not modified after a `Node` is constructed.
@@ -248,7 +250,7 @@ These classes do touch the filesystem and the network. They are kept dependency-
 
 ### Segment storage: append-mode files + stdlib buffered writes
 
-Log segments are plain regular files opened with POSIX append mode (`File.new(path, "a+")`). Every write atomically lands at EOF — the kernel maintains the write offset and updates it atomically per `write(2)` syscall, so no explicit positioning is needed in user space. Crystal's `IO::Buffered` accumulates small writes (the per-`LogEntry` header + payload pieces) in a per-File user-space buffer; one `flush` after `entry.to_io(@file)` issues a single `write(2)` syscall per appended entry.
+Log segments are plain regular files opened with POSIX append mode (`File.new(path, "a+")`). Every write atomically lands at EOF — the kernel maintains the write offset and updates it atomically per `write(2)` syscall, so no explicit positioning is needed in user space. Crystal's `IO::Buffered` accumulates small writes (the per-`LogEntry` header + payload pieces) in a per-File user-space buffer; `Segment#append` deliberately does **not** flush. The flush is deferred to `Segment#sync` (called at Raft's durability boundaries), so a batch of N appends between two boundaries collapses into a single `write(2)` syscall followed by one `fsync` — instead of `O(N)` syscalls for `O(N)` appends.
 
 **Reads** go through stdlib `File#read_at` (which uses `pread(2)` internally) — concurrent-read-safe, no shared file-position state with the write path. Multiple followers can have the same segment file being read at different offsets simultaneously without contention.
 
@@ -258,7 +260,7 @@ Log segments are plain regular files opened with POSIX append mode (`File.new(pa
 
 ### `Raft::Log::Segment(T)`
 
-One log segment file. Owns a `File` (in `"a+"` mode), an in-memory offset array `@offsets : Array(UInt64)` mapping `index → byte offset within the file`, and a `@size : Int64` tracking total written bytes. A segment can be read by index (O(1) offset lookup, then `File#read_at` to deserialize), appended to (via `entry.to_io(@file) + flush`, which leverages `IO::Buffered` coalescing), or truncated (via `File#truncate` to shrink the file in place).
+One log segment file. Owns a `File` (in `"a+"` mode), an in-memory offset array `@offsets : Array(UInt64)` mapping `index → byte offset within the file`, and a `@size : Int64` tracking total written bytes. A segment can be read by index (O(1) offset lookup, then `File#read_at` to deserialize), appended to (via `entry.to_io(@file)` — the flush is deferred to the next `sync` call so a batch of appends coalesces into one `write(2)`), or truncated (via `File#truncate` to shrink the file in place).
 
 The segment filename is the zero-padded first index it contains: `0000000000000001.log`, `0000000000010001.log`, etc. This makes lexicographic directory listing equal to chronological order.
 

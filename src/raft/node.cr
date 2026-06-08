@@ -1,4 +1,24 @@
 module Raft
+  # Implements the Raft consensus protocol for a single peer in a single
+  # group. Generic over `T`, the application's command type.
+  #
+  # ## Threading contract
+  #
+  # **A Node is single-fiber.** All five public entry points — `tick`,
+  # `step`, `propose`, `take_messages`, and `read_index` — and all
+  # registration methods (`on_role_change`, `on_configuration_change`,
+  # `on_configuration_applied`) must be called from the same fiber that
+  # owns the node's loop. Internal state (`@current_term`, `@log`,
+  # `@peers`, `@outbox`, `@pending_reads`, `@pending_apply`) is mutated
+  # without locks because of this invariant.
+  #
+  # Callbacks fire on that same fiber and must therefore be non-blocking
+  # — channel a signal to your own fiber if you need to do real work.
+  #
+  # If you need to call `propose` from a different fiber (e.g. an HTTP
+  # handler), send the request over a channel and have the loop fiber
+  # do the actual call. The KV and queue examples demonstrate this
+  # pattern in `start_group_loop`.
   class Node(T)
     getter role : Role = Role::Follower
     getter current_term : UInt64 = 0_u64
@@ -319,13 +339,25 @@ module Raft
       messages
     end
 
+    # Fires when a Configuration entry is **committed** (apply phase). Block
+    # receives the new peer list. Use this for actions that should only run
+    # after a membership change is durable across a majority — e.g. cascading
+    # data-group reconfiguration in a multi-raft setup.
+    #
+    # Runs on the Raft fiber; keep it non-blocking. See class docs for the
+    # full threading contract.
     def on_configuration_change(&block : Array(Peer) ->)
       @on_configuration_change = block
     end
 
-    # Called whenever the peer list changes — both when config entries are stored
-    # in the log (followers) and when they're committed (leader). Use this to
-    # register transport peer addresses from config entries.
+    # Fires whenever the peer list changes — both when config entries are
+    # **stored** in the log (followers, before commit) and when they're
+    # committed (leader). Use this to register transport peer addresses
+    # from config entries; followers can route to new peers as soon as
+    # they see the entry, without waiting for the cluster commit cycle.
+    #
+    # Runs on the Raft fiber; keep it non-blocking. See class docs for the
+    # full threading contract.
     def on_configuration_applied(&block : Array(Peer) ->)
       @on_configuration_applied = block
     end
@@ -1049,12 +1081,6 @@ module Raft
       @peers = new_peers
       persist_state
       @on_configuration_applied.try(&.call(@peers))
-    end
-
-    # Test helper — drives persist_snapshot from outside while
-    # take_snapshot doesn't exist yet (added in Task 3).
-    def persist_snapshot_for_test(index : UInt64, term : UInt64)
-      persist_snapshot(index, term)
     end
 
     private def take_snapshot
