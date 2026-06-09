@@ -1,6 +1,9 @@
 require "socket"
 require "sync/exclusive"
 require "sync/shared"
+require "../config"
+require "../message"
+require "../transport"
 
 module Raft
   class TCPTransport < Transport

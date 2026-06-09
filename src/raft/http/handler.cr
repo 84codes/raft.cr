@@ -1,5 +1,7 @@
 require "http/server/handler"
 require "json"
+require "../node"
+require "../transport/tcp_transport"
 
 module Raft
   module HTTP

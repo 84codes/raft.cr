@@ -1,6 +1,8 @@
 require "sync/exclusive"
 require "sync/shared"
+require "../config"
 require "../message"
+require "../transport"
 
 module Raft
   # In-memory transport backed by IO pipes. Wire format is identical to

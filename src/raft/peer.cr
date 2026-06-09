@@ -1,3 +1,5 @@
+require "./config"
+
 module Raft
   struct Peer
     enum Role : UInt8

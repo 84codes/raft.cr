@@ -1,4 +1,8 @@
 require "sync/shared"
+require "./config"
+require "./message"
+require "./node"
+require "./state_machine"
 
 module Raft
   class Server(T)
