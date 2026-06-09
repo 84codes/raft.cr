@@ -1,3 +1,7 @@
+require "./config"
+require "./log_entry"
+require "./log/segment"
+
 module Raft
   class Log(T)
     getter last_index : UInt64 = 0_u64

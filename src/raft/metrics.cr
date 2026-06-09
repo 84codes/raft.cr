@@ -1,4 +1,5 @@
 require "sync/exclusive"
+require "./config"
 
 module Raft
   class Metrics

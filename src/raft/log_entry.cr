@@ -1,3 +1,5 @@
+require "./message"
+
 module Raft
   struct LogEntry(T)
     getter term : UInt64

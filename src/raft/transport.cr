@@ -1,3 +1,6 @@
+require "./config"
+require "./message"
+
 module Raft
   abstract class Transport
     abstract def outbox : Channel({NodeID, Message})

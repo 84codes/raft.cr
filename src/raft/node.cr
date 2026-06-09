@@ -1,3 +1,11 @@
+require "./config"
+require "./message"
+require "./peer"
+require "./log_entry"
+require "./log"
+require "./state_machine"
+require "./metrics"
+
 module Raft
   # Implements the Raft consensus protocol for a single peer in a single
   # group. Generic over `T`, the application's command type.

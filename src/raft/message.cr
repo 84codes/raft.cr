@@ -1,3 +1,5 @@
+require "./config"
+
 module Raft
   enum EntryType : UInt8
     Normal        = 0
