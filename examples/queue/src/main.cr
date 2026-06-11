@@ -133,10 +133,11 @@ end
 
 transport.start
 
-raft_handler = Raft::HTTP::Handler(QueueCommand).new(meta_node, transport, raft_advertise_address)
+raft_status_handler = Raft::HTTP::StatusHandler(QueueCommand).new(meta_node, transport, raft_advertise_address)
+raft_admin_handler = Raft::HTTP::AdminHandler(QueueCommand).new(meta_node, transport)
 queue_handler = QueueHttpHandler.new(meta_node, meta_sm, nodes, state_machines, transport)
 
-server = ::HTTP::Server.new([queue_handler, raft_handler]) do |context|
+server = ::HTTP::Server.new([queue_handler, raft_status_handler, raft_admin_handler]) do |context|
   context.response.status_code = 404
   context.response.print "Not found"
 end

@@ -5,104 +5,40 @@ require "../transport/tcp_transport"
 
 module Raft
   module HTTP
-    class Handler(T)
+    # Mutating HTTP handler exposing cluster administration over `POST
+    # /raft/admin/*`. Mount behind authentication — every route mutates
+    # cluster state (membership, leadership, or under `-Draft_debug`, the
+    # chaos primitives).
+    #
+    # Routes (all `POST`):
+    # - `/raft/admin/bootstrap` — turn an empty node into a single-node cluster
+    # - `/raft/admin/register_peer` — register a peer's address with the transport
+    # - `/raft/admin/add_server/{id}` — add a learner with optional `{"address": "..."}` body
+    # - `/raft/admin/remove_server/{id}` — remove a server from the configuration
+    # - `/raft/admin/promote_learner/{id}` — promote a learner to voter
+    # - `/raft/admin/transfer_leadership/{id}` — initiate leadership transfer
+    # - `-Draft_debug` only: `/raft/admin/pause|resume|partition|heal|reset`
+    #
+    # Anything else falls through to the next handler in the chain via
+    # `call_next`. Pair with `StatusHandler` to expose the read-only surface
+    # on a separate endpoint.
+    class AdminHandler(T)
       include ::HTTP::Handler
 
       @node : Node(T)
       @transport : TCPTransport?
-      @raft_address : String?
 
-      def initialize(@node : Node(T), @transport : TCPTransport? = nil, @raft_address : String? = nil)
+      def initialize(@node : Node(T), @transport : TCPTransport? = nil)
       end
 
       def call(context : ::HTTP::Server::Context)
         method = context.request.method
         path = context.request.path
 
-        case {method, path}
-        when {"GET", "/raft/status"}
-          handle_status(context)
-        when {"GET", "/raft/log"}
-          handle_log(context)
-        when {"GET", "/raft/metrics"}
-          handle_metrics(context)
+        if method == "POST" && path.starts_with?("/raft/admin/")
+          handle_admin(context, path)
         else
-          if method == "POST" && path.starts_with?("/raft/admin/")
-            handle_admin(context, path)
-            return
-          end
           call_next(context)
-        end
-      end
-
-      private def handle_status(context)
-        leader_id = @node.leader_id
-        json = JSON.build do |j|
-          j.object do
-            j.field "id", @node.id
-            j.field "role", @node.role.to_s.downcase
-            j.field "term", @node.current_term
-            j.field "raft_address", @raft_address if @raft_address
-            j.field "leader_id", leader_id
-            j.field "commit_index", @node.commit_index
-            j.field "last_log_index", @node.log.last_index
-            j.field "peers" do
-              j.array do
-                @node.peers.each do |p|
-                  j.object do
-                    j.field "id", p.id
-                    j.field "role", p.role.to_s.downcase
-                    j.field "address", p.address unless p.address.empty?
-                  end
-                end
-              end
-            end
-            {% if flag?(:raft_debug) %}
-              j.field "paused", @node.paused
-            {% end %}
-          end
-        end
-        context.response.content_type = "application/json"
-        context.response.status_code = 200
-        context.response.print json
-      end
-
-      private def handle_log(context)
-        json = JSON.build do |j|
-          j.object do
-            j.field "last_index", @node.log.last_index
-            j.field "last_term", @node.log.last_term
-            j.field "segment_count", @node.log.segment_count
-            j.field "commit_index", @node.commit_index
-          end
-        end
-        context.response.content_type = "application/json"
-        context.response.status_code = 200
-        context.response.print json
-      end
-
-      private def handle_metrics(context)
-        if metrics = @node.metrics
-          # Update gauges from current node state
-          metrics.set_gauge("raft_node_role", @node.role.value.to_i64)
-          metrics.set_gauge("raft_node_term", @node.current_term.to_i64)
-          metrics.set_gauge("raft_node_commit_index", @node.commit_index.to_i64)
-          metrics.set_gauge("raft_node_last_log_index", @node.log.last_index.to_i64)
-          metrics.set_gauge("raft_node_first_log_index", @node.log.first_index.to_i64)
-          metrics.set_gauge("raft_node_segment_count", @node.log.segment_count.to_i64)
-          metrics.set_gauge("raft_node_snapshot_index", @node.snapshot_index.to_i64)
-          metrics.set_gauge("raft_node_snapshot_size_bytes", @node.snapshot_size_bytes)
-          metrics.set_gauge("raft_node_peers", @node.peers.size.to_i64)
-          metrics.set_gauge("raft_node_is_leader", @node.role.leader? ? 1_i64 : 0_i64)
-          metrics.set_gauge("raft_node_leader_id", (@node.leader_id || 0_u64).to_i64)
-
-          context.response.content_type = "text/plain; version=0.0.4"
-          context.response.status_code = 200
-          context.response.print metrics.to_prometheus
-          @transport.try(&.to_prometheus(context.response))
-        else
-          context.response.status_code = 503
-          context.response.print "Metrics not configured"
         end
       end
 
