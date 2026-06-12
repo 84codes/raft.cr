@@ -26,7 +26,7 @@ describe Raft::HTTP::StatusHandler do
     dir = File.tempname("raft_status")
     node = make_node(dir)
 
-    handler = Raft::HTTP::StatusHandler(TestData).new(node)
+    handler = Raft::HTTP::StatusHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen
@@ -46,7 +46,7 @@ describe Raft::HTTP::StatusHandler do
     dir = File.tempname("raft_status")
     node = make_node_with_metrics(dir)
 
-    handler = Raft::HTTP::StatusHandler(TestData).new(node)
+    handler = Raft::HTTP::StatusHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen
@@ -70,7 +70,7 @@ describe Raft::HTTP::StatusHandler do
     dir = File.tempname("raft_status")
     node = make_node(dir)
 
-    handler = Raft::HTTP::StatusHandler(TestData).new(node)
+    handler = Raft::HTTP::StatusHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen

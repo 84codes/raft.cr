@@ -1,6 +1,6 @@
 require "http/server/handler"
 require "json"
-require "../node"
+require "../status_source"
 require "../transport/tcp_transport"
 
 module Raft
@@ -17,14 +17,17 @@ module Raft
     # Anything else (including `POST /raft/admin/*`) falls through to the next
     # handler in the chain via `call_next`. Pair with `AdminHandler` to expose
     # the mutating surface on a separate (typically authenticated) endpoint.
-    class StatusHandler(T)
+    #
+    # Concrete (non-generic) — takes any `StatusSource`, which `Node(T)`
+    # includes.
+    class StatusHandler
       include ::HTTP::Handler
 
-      @node : Node(T)
+      @node : StatusSource
       @transport : TCPTransport?
       @raft_address : String?
 
-      def initialize(@node : Node(T), @transport : TCPTransport? = nil, @raft_address : String? = nil)
+      def initialize(@node : StatusSource, @transport : TCPTransport? = nil, @raft_address : String? = nil)
       end
 
       def call(context : ::HTTP::Server::Context)
@@ -53,7 +56,7 @@ module Raft
             j.field "raft_address", @raft_address if @raft_address
             j.field "leader_id", leader_id
             j.field "commit_index", @node.commit_index
-            j.field "last_log_index", @node.log.last_index
+            j.field "last_log_index", @node.last_log_index
             j.field "peers" do
               j.array do
                 @node.peers.each do |p|
@@ -78,9 +81,9 @@ module Raft
       private def handle_log(context)
         json = JSON.build do |j|
           j.object do
-            j.field "last_index", @node.log.last_index
-            j.field "last_term", @node.log.last_term
-            j.field "segment_count", @node.log.segment_count
+            j.field "last_index", @node.last_log_index
+            j.field "last_term", @node.last_log_term
+            j.field "segment_count", @node.segment_count
             j.field "commit_index", @node.commit_index
           end
         end
@@ -95,9 +98,9 @@ module Raft
           metrics.set_gauge("raft_node_role", @node.role.value.to_i64)
           metrics.set_gauge("raft_node_term", @node.current_term.to_i64)
           metrics.set_gauge("raft_node_commit_index", @node.commit_index.to_i64)
-          metrics.set_gauge("raft_node_last_log_index", @node.log.last_index.to_i64)
-          metrics.set_gauge("raft_node_first_log_index", @node.log.first_index.to_i64)
-          metrics.set_gauge("raft_node_segment_count", @node.log.segment_count.to_i64)
+          metrics.set_gauge("raft_node_last_log_index", @node.last_log_index.to_i64)
+          metrics.set_gauge("raft_node_first_log_index", @node.first_log_index.to_i64)
+          metrics.set_gauge("raft_node_segment_count", @node.segment_count.to_i64)
           metrics.set_gauge("raft_node_snapshot_index", @node.snapshot_index.to_i64)
           metrics.set_gauge("raft_node_snapshot_size_bytes", @node.snapshot_size_bytes)
           metrics.set_gauge("raft_node_peers", @node.peers.size.to_i64)

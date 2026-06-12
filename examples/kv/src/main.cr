@@ -127,8 +127,8 @@ end
 transport.start
 
 # HTTP server
-raft_status_handler = Raft::HTTP::StatusHandler(KVCommand).new(meta_node, transport, raft_advertise_address)
-raft_admin_handler = Raft::HTTP::AdminHandler(KVCommand).new(meta_node, transport)
+raft_status_handler = Raft::HTTP::StatusHandler.new(meta_node, transport, raft_advertise_address)
+raft_admin_handler = Raft::HTTP::AdminHandler.new(meta_node, transport)
 kv_handler = KVHttpHandler.new(meta_node, meta_sm, nodes, value_machines)
 
 server = ::HTTP::Server.new([kv_handler, raft_status_handler, raft_admin_handler]) do |context|
