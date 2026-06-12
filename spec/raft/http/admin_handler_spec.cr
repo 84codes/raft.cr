@@ -16,7 +16,7 @@ describe Raft::HTTP::AdminHandler do
     dir = File.tempname("raft_admin")
     node = make_node(dir, peers: [] of Raft::NodeID)
 
-    handler = Raft::HTTP::AdminHandler(TestData).new(node)
+    handler = Raft::HTTP::AdminHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen
@@ -35,7 +35,7 @@ describe Raft::HTTP::AdminHandler do
     dir = File.tempname("raft_admin")
     node = make_node(dir)
 
-    handler = Raft::HTTP::AdminHandler(TestData).new(node)
+    handler = Raft::HTTP::AdminHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen
@@ -52,7 +52,7 @@ describe Raft::HTTP::AdminHandler do
     dir = File.tempname("raft_admin")
     node = make_node(dir)
 
-    handler = Raft::HTTP::AdminHandler(TestData).new(node)
+    handler = Raft::HTTP::AdminHandler.new(node)
     server = ::HTTP::Server.new([handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen
@@ -70,7 +70,7 @@ describe Raft::HTTP::AdminHandler do
       dir = File.tempname("raft_admin")
       node = make_node(dir)
 
-      handler = Raft::HTTP::AdminHandler(TestData).new(node)
+      handler = Raft::HTTP::AdminHandler.new(node)
       server = ::HTTP::Server.new([handler])
       address = server.bind_tcp("127.0.0.1", 0)
       spawn server.listen
@@ -100,8 +100,8 @@ describe "Raft::HTTP::StatusHandler + AdminHandler chained" do
     config.election_timeout_max_ticks = 100_u32
     node = Raft::Node(TestData).new(id: 1_u64, peers: [] of Raft::NodeID, config: config, state_machine: TestStateMachine.new)
 
-    status_handler = Raft::HTTP::StatusHandler(TestData).new(node)
-    admin_handler = Raft::HTTP::AdminHandler(TestData).new(node)
+    status_handler = Raft::HTTP::StatusHandler.new(node)
+    admin_handler = Raft::HTTP::AdminHandler.new(node)
     server = ::HTTP::Server.new([status_handler, admin_handler])
     address = server.bind_tcp("127.0.0.1", 0)
     spawn server.listen

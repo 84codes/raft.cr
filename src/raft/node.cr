@@ -5,6 +5,8 @@ require "./log_entry"
 require "./log"
 require "./state_machine"
 require "./metrics"
+require "./status_source"
+require "./admin_ops"
 
 module Raft
   # Implements the Raft consensus protocol for a single peer in a single
@@ -28,6 +30,9 @@ module Raft
   # do the actual call. The KV and queue examples demonstrate this
   # pattern in `start_group_loop`.
   class Node(T)
+    include StatusSource
+    include AdminOps
+
     getter role : Role = Role::Follower
     getter current_term : UInt64 = 0_u64
     getter id : NodeID
@@ -42,6 +47,24 @@ module Raft
     def snapshot_size_bytes : Int64
       path = File.join(@config.data_dir, "snapshot")
       File.exists?(path) ? File.size(path).to_i64 : 0_i64
+    end
+
+    # T-free log scalars for StatusSource — let status/metrics consumers
+    # read log shape without holding a reference to the mutable Log(T).
+    def last_log_index : UInt64
+      @log.last_index
+    end
+
+    def last_log_term : UInt64
+      @log.last_term
+    end
+
+    def first_log_index : UInt64
+      @log.first_index
+    end
+
+    def segment_count : Int32
+      @log.segment_count
     end
 
     getter peers : Array(Peer)
