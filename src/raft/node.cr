@@ -312,12 +312,25 @@ module Raft
       true
     end
 
-    # Add a new node to the cluster as a learner.
-    # Returns false if not leader or node already exists.
+    # Add a new node to the cluster as a learner, or re-admit a returning member.
+    # - New id: adds as Learner, returns true.
+    # - Known id, different non-empty address: updates the stored address and replicates
+    #   the new configuration, returns true.
+    # - Known id, same address (or empty address passed): no-op, returns true.
+    # Returns false if not leader, if a configuration change is already in flight, or if node_id == @id.
     def add_server(node_id : NodeID, address : String = "") : Bool
       return false unless @role == Role::Leader
       return false if @pending_config_index > @commit_index
-      return false if @peers.any? { |p| p.id == node_id }
+      return false if node_id == @id
+      if existing = @peers.find { |p| p.id == node_id }
+        # Returning member: update address only if a non-empty new address differs.
+        return true if address.empty? || existing.address == address
+        new_peers = @peers.map do |p|
+          p.id == node_id ? Peer.new(p.id, p.role, address) : p
+        end
+        append_configuration(new_peers)
+        return true
+      end
       new_peers = @peers.dup
       new_peers << Peer.new(node_id, Peer::Role::Learner, address)
       append_configuration(new_peers)
@@ -513,7 +526,7 @@ module Raft
 
     private def cancel_pending_reads
       return if @pending_reads.empty? && @pending_apply.empty?
-      (@pending_reads + @pending_apply).each { |pr| pr.callback.call(nil) }
+      (@pending_reads + @pending_apply).each(&.callback.call(nil))
       @pending_reads.clear
       @pending_apply.clear
     end
@@ -1177,7 +1190,7 @@ module Raft
           f.write_bytes(0_u8, IO::ByteFormat::LittleEndian)
         end
         f.write_bytes(@peers.size.to_u32, IO::ByteFormat::LittleEndian)
-        @peers.each { |p| p.to_io(f) }
+        @peers.each(&.to_io(f))
         f.fsync
       end
       File.rename(tmp_path, path)
@@ -1207,7 +1220,7 @@ module Raft
     private def serialize_peers(peers : Array(Peer) = @peers) : Bytes
       io = IO::Memory.new
       io.write_bytes(peers.size.to_u32, IO::ByteFormat::LittleEndian)
-      peers.each { |p| p.to_io(io) }
+      peers.each(&.to_io(io))
       io.to_slice.dup
     end
 
