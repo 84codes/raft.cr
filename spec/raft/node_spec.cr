@@ -125,6 +125,76 @@ describe Raft::Node do
 
       nodes.each_value(&.close)
     end
+
+    it "does not start an election from a pre-vote response by a learner" do
+      dir = File.tempname("raft_learner_prevote")
+      Dir.mkdir_p(dir)
+      config = Raft::Config.new
+      config.data_dir = dir
+      config.election_timeout_min_ticks = 1_u32
+      config.election_timeout_max_ticks = 1_u32
+      node = Raft::Node(TestData).new(
+        id: 1_u64,
+        peers: [2_u64],
+        config: config,
+        state_machine: TestStateMachine.new,
+      )
+      node.peers << Raft::Peer.new(3_u64, Raft::Peer::Role::Learner)
+
+      begin
+        node.tick
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: 3_u64,
+          term: 1_u64,
+          success: true,
+        ))
+
+        node.role.should eq Raft::Role::Follower
+      ensure
+        node.close
+        FileUtils.rm_rf(dir)
+      end
+    end
+
+    it "does not elect a candidate from a RequestVote response by a learner" do
+      dir = File.tempname("raft_learner_vote")
+      Dir.mkdir_p(dir)
+      config = Raft::Config.new
+      config.data_dir = dir
+      config.election_timeout_min_ticks = 1_u32
+      config.election_timeout_max_ticks = 1_u32
+      node = Raft::Node(TestData).new(
+        id: 1_u64,
+        peers: [2_u64],
+        config: config,
+        state_machine: TestStateMachine.new,
+      )
+      node.peers << Raft::Peer.new(3_u64, Raft::Peer::Role::Learner)
+
+      begin
+        node.tick
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: 2_u64,
+          term: 1_u64,
+          success: true,
+        ))
+        node.role.should eq Raft::Role::Candidate
+
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::RequestVoteResponse,
+          from: 3_u64,
+          term: 1_u64,
+          success: true,
+        ))
+
+        node.role.should eq Raft::Role::Candidate
+      ensure
+        node.close
+        FileUtils.rm_rf(dir)
+      end
+    end
   end
 
   describe "leader behavior" do
@@ -253,6 +323,80 @@ describe Raft::Node do
   end
 
   describe "log replication and commit" do
+    it "does not count a stale-term AppendEntries response toward commitment" do
+      dir = File.tempname("raft_stale_append_response")
+      Dir.mkdir_p(dir)
+      config = Raft::Config.new
+      config.data_dir = dir
+      config.election_timeout_min_ticks = 1_u32
+      config.election_timeout_max_ticks = 1_u32
+      node = Raft::Node(TestData).new(
+        id: 1_u64,
+        peers: [2_u64, 3_u64],
+        config: config,
+        state_machine: TestStateMachine.new,
+      )
+
+      begin
+        # Elect a term-1 leader using peer 2's responses.
+        node.tick
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: 2_u64,
+          term: 1_u64,
+          success: true,
+        ))
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::RequestVoteResponse,
+          from: 2_u64,
+          term: 1_u64,
+          success: true,
+        ))
+        node.role.should eq Raft::Role::Leader
+
+        # A higher-term AppendEntries makes it step down. It is then elected
+        # again in term 3, creating a current-term no-op at index 2.
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::AppendEntries,
+          from: 2_u64,
+          term: 2_u64,
+          prev_log_index: 0_u64,
+          prev_log_term: 0_u64,
+        ))
+        node.tick
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::PreVoteResponse,
+          from: 2_u64,
+          term: 3_u64,
+          success: true,
+        ))
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::RequestVoteResponse,
+          from: 2_u64,
+          term: 3_u64,
+          success: true,
+        ))
+        node.role.should eq Raft::Role::Leader
+        node.current_term.should eq 3_u64
+        node.commit_index.should eq 0_u64
+
+        # A delayed term-1 success response must not be treated as replication
+        # of the term-3 entry at index 2.
+        node.step(Raft::Message.new(
+          type: Raft::MessageType::AppendEntriesResponse,
+          from: 2_u64,
+          term: 1_u64,
+          success: true,
+          last_log_index: 2_u64,
+        ))
+
+        node.commit_index.should eq 0_u64
+      ensure
+        node.close
+        FileUtils.rm_rf(dir)
+      end
+    end
+
     it "commits entry when majority replicates" do
       config = Raft::Config.new
       config.election_timeout_min_ticks = 5_u32
