@@ -127,18 +127,10 @@ describe Raft::Node do
     end
 
     it "does not start an election from a pre-vote response by a learner" do
-      dir = File.tempname("raft_learner_prevote")
-      Dir.mkdir_p(dir)
       config = Raft::Config.new
-      config.data_dir = dir
       config.election_timeout_min_ticks = 1_u32
       config.election_timeout_max_ticks = 1_u32
-      node = Raft::Node(TestData).new(
-        id: 1_u64,
-        peers: [2_u64],
-        config: config,
-        state_machine: TestStateMachine.new,
-      )
+      node = create_test_node(1_u64, [2_u64], config)
       node.peers << Raft::Peer.new(3_u64, Raft::Peer::Role::Learner)
 
       begin
@@ -153,23 +145,14 @@ describe Raft::Node do
         node.role.should eq Raft::Role::Follower
       ensure
         node.close
-        FileUtils.rm_rf(dir)
       end
     end
 
     it "does not elect a candidate from a RequestVote response by a learner" do
-      dir = File.tempname("raft_learner_vote")
-      Dir.mkdir_p(dir)
       config = Raft::Config.new
-      config.data_dir = dir
       config.election_timeout_min_ticks = 1_u32
       config.election_timeout_max_ticks = 1_u32
-      node = Raft::Node(TestData).new(
-        id: 1_u64,
-        peers: [2_u64],
-        config: config,
-        state_machine: TestStateMachine.new,
-      )
+      node = create_test_node(1_u64, [2_u64], config)
       node.peers << Raft::Peer.new(3_u64, Raft::Peer::Role::Learner)
 
       begin
@@ -192,7 +175,6 @@ describe Raft::Node do
         node.role.should eq Raft::Role::Candidate
       ensure
         node.close
-        FileUtils.rm_rf(dir)
       end
     end
   end
@@ -324,18 +306,10 @@ describe Raft::Node do
 
   describe "log replication and commit" do
     it "does not count a stale-term AppendEntries response toward commitment" do
-      dir = File.tempname("raft_stale_append_response")
-      Dir.mkdir_p(dir)
       config = Raft::Config.new
-      config.data_dir = dir
       config.election_timeout_min_ticks = 1_u32
       config.election_timeout_max_ticks = 1_u32
-      node = Raft::Node(TestData).new(
-        id: 1_u64,
-        peers: [2_u64, 3_u64],
-        config: config,
-        state_machine: TestStateMachine.new,
-      )
+      node = create_test_node(1_u64, [2_u64, 3_u64], config)
 
       begin
         # Elect a term-1 leader using peer 2's responses.
@@ -393,7 +367,6 @@ describe Raft::Node do
         node.commit_index.should eq 0_u64
       ensure
         node.close
-        FileUtils.rm_rf(dir)
       end
     end
 

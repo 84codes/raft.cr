@@ -442,11 +442,11 @@ module Raft
       @peers.select { |p| p.id != @id && p.voter? }
     end
 
-    private def is_peer?(node_id : NodeID) : Bool
+    private def known_peer?(node_id : NodeID) : Bool
       @peers.any? { |peer| peer.id == node_id && peer.id != @id }
     end
 
-    private def is_voter?(node_id : NodeID) : Bool
+    private def voting_peer?(node_id : NodeID) : Bool
       @peers.any? { |peer| peer.id == node_id && peer.id != @id && peer.voter? }
     end
 
@@ -675,7 +675,7 @@ module Raft
     private def handle_append_entries_response(msg : Message)
       return unless @role == Role::Leader
       return unless msg.term == @current_term
-      return unless is_peer?(msg.from)
+      return unless known_peer?(msg.from)
 
       if msg.success
         # Clamp to our own log length — follower may report a higher index
@@ -700,9 +700,7 @@ module Raft
 
     private def record_read_index_ack(msg : Message)
       return if @pending_reads.empty?
-      return if msg.term < @current_term # stale ack — protocol invariant
-      voter_ids = voters.map(&.id).to_set
-      return unless voter_ids.includes?(msg.from)
+      return unless voting_peer?(msg.from)
 
       promoted = [] of PendingRead
       @pending_reads.reject! do |pr|
@@ -824,7 +822,7 @@ module Raft
     private def handle_request_vote_response(msg : Message)
       return unless @role == Role::Candidate
       return unless msg.term == @current_term
-      return unless is_voter?(msg.from)
+      return unless voting_peer?(msg.from)
 
       if msg.success
         @votes_received.add(msg.from)
@@ -1023,7 +1021,7 @@ module Raft
 
     private def handle_pre_vote_response(msg : Message)
       return unless msg.term == @current_term + 1 # must match our proposed term
-      return unless is_voter?(msg.from)
+      return unless voting_peer?(msg.from)
 
       if msg.success
         @pre_votes_received.add(msg.from)
